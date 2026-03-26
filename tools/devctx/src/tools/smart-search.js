@@ -387,6 +387,8 @@ export const smartSearch = async ({ query, cwd = '.', intent, _testForceWalk = f
     retrievalConfidence = provenance.skippedItemsTotal > 0 ? 'low' : 'medium';
   }
 
+  const confidence = { level: retrievalConfidence, indexFreshness };
+
   const result = {
     query,
     root,
@@ -394,6 +396,7 @@ export const smartSearch = async ({ query, cwd = '.', intent, _testForceWalk = f
     retrievalConfidence,
     indexFreshness,
     sourceBreakdown: breakdown,
+    confidence,
     ...(validIntent ? { intent: validIntent } : {}),
     ...(indexHits ? { indexBoosted: indexHits.size } : {}),
     totalMatches: dedupedMatches.length,

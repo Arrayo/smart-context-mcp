@@ -31,6 +31,7 @@ export const smartReadBatch = async ({ files, maxTokens }) => {
         parser: readResult.parser,
         truncated: readResult.truncated,
         content: readResult.content,
+        ...(readResult.confidence ? { confidence: readResult.confidence } : {}),
         ...(readResult.indexHint !== undefined ? { indexHint: readResult.indexHint } : {}),
         ...(readResult.chosenMode ? { chosenMode: readResult.chosenMode, budgetApplied: true } : {}),
       });

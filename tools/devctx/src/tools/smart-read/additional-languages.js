@@ -448,3 +448,237 @@ export const summarizeSql = (content, mode) => {
     truncateSection('# CTEs', toUniqueLines(ctes, 16), 900),
   ], 5000);
 };
+
+// ---------------------------------------------------------------------------
+// C#
+// ---------------------------------------------------------------------------
+
+export const extractCsharpSymbol = (content, symbolName) =>
+  extractBraceBlock(content, symbolName, (line, name) =>
+    new RegExp(`(?:class|struct|interface|enum|record)\\s+${name}`).test(line) ||
+    new RegExp(`[\\w<>\\[\\]]+\\s+${name}\\s*\\(`).test(line));
+
+export const summarizeCsharp = (content, mode) => {
+  const lines = content.split('\n');
+  const usings = [];
+  const namespaces = [];
+  const declarations = [];
+  const methods = [];
+  let currentType = null;
+  let braceDepth = 0;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+
+    const usingMatch = trimmed.match(/^using\s+([\w.]+);$/);
+    if (usingMatch) { usings.push(usingMatch[1]); continue; }
+
+    const nsMatch = trimmed.match(/^namespace\s+([\w.]+)/);
+    if (nsMatch) { namespaces.push(`namespace ${nsMatch[1]}`); }
+
+    const typeMatch = trimmed.match(/^(?:public\s+)?(?:static\s+|abstract\s+|sealed\s+|partial\s+)*(class|struct|interface|enum|record)\s+([A-Za-z_]\w*)/);
+    if (typeMatch) {
+      currentType = typeMatch[2];
+      declarations.push(`${typeMatch[1]} ${typeMatch[2]}`);
+    }
+
+    const methodMatch = trimmed.match(/^(?:public|protected|private|internal)\s+(?:static\s+)?(?:virtual\s+|override\s+|abstract\s+|async\s+)?(?:[A-Za-z0-9_<>\[\],.\s]+\s+)([A-Za-z_]\w*)\s*\(/);
+    if (methodMatch && currentType) {
+      methods.push(`${currentType}::${methodMatch[1]}`);
+    }
+
+    braceDepth += (trimmed.match(/\{/g) ?? []).length;
+    braceDepth -= (trimmed.match(/\}/g) ?? []).length;
+    if (braceDepth <= 0) { currentType = null; braceDepth = 0; }
+  }
+
+  if (mode === 'signatures') {
+    return joinSections([
+      truncateSection('# Declarations', toUniqueLines([...declarations, ...methods]), 2600),
+      truncateSection('# Usings', toUniqueLines(usings, 10), 900),
+    ], 4000);
+  }
+
+  return joinSections([
+    truncateSection('# Namespaces', toUniqueLines(namespaces, 5), 300),
+    truncateSection('# Declarations', toUniqueLines(declarations, 20), 1400),
+    truncateSection('# Methods', toUniqueLines(methods, 20), 1800),
+    truncateSection('# Usings', toUniqueLines(usings, 12), 1000),
+  ], 5000);
+};
+
+// ---------------------------------------------------------------------------
+// Kotlin
+// ---------------------------------------------------------------------------
+
+export const extractKotlinSymbol = (content, symbolName) =>
+  extractBraceBlock(content, symbolName, (line, name) =>
+    new RegExp(`(?:class|object|interface|enum)\\s+${name}`).test(line) ||
+    new RegExp(`fun\\s+(?:<[^>]+>\\s+)?${name}\\s*\\(`).test(line));
+
+export const summarizeKotlin = (content, mode) => {
+  const lines = content.split('\n');
+  const imports = [];
+  const packages = [];
+  const declarations = [];
+  const functions = [];
+  let currentType = null;
+  let braceDepth = 0;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+
+    const pkgMatch = trimmed.match(/^package\s+([\w.]+)$/);
+    if (pkgMatch) { packages.push(`package ${pkgMatch[1]}`); continue; }
+
+    const impMatch = trimmed.match(/^import\s+([\w.*]+)$/);
+    if (impMatch) { imports.push(impMatch[1]); continue; }
+
+    const typeMatch = trimmed.match(/^(?:open|abstract|data|sealed|internal|private|protected|\s)*(class|object|interface|enum)\s+([A-Za-z_]\w*)/);
+    if (typeMatch) {
+      currentType = typeMatch[2];
+      declarations.push(`${typeMatch[1]} ${typeMatch[2]}`);
+    }
+
+    const funMatch = trimmed.match(/^(?:(?:public|private|protected|internal|open|override|suspend|inline)\s+)*fun\s+(?:<[^>]+>\s+)?([A-Za-z_]\w*)\s*\(/);
+    if (funMatch) {
+      const owner = currentType && braceDepth > 0 ? `${currentType}::` : '';
+      functions.push(`${owner}${funMatch[1]}`);
+    }
+
+    braceDepth += (trimmed.match(/\{/g) ?? []).length;
+    braceDepth -= (trimmed.match(/\}/g) ?? []).length;
+    if (braceDepth <= 0) { currentType = null; braceDepth = 0; }
+  }
+
+  if (mode === 'signatures') {
+    return joinSections([
+      truncateSection('# Declarations', toUniqueLines([...declarations, ...functions]), 2600),
+      truncateSection('# Imports', toUniqueLines(imports, 10), 900),
+    ], 4000);
+  }
+
+  return joinSections([
+    truncateSection('# Package', toUniqueLines(packages, 2), 300),
+    truncateSection('# Declarations', toUniqueLines(declarations, 20), 1400),
+    truncateSection('# Functions', toUniqueLines(functions, 20), 1800),
+    truncateSection('# Imports', toUniqueLines(imports, 12), 1000),
+  ], 5000);
+};
+
+// ---------------------------------------------------------------------------
+// PHP
+// ---------------------------------------------------------------------------
+
+export const extractPhpSymbol = (content, symbolName) =>
+  extractBraceBlock(content, symbolName, (line, name) =>
+    new RegExp(`(?:class|interface|trait|enum)\\s+${name}`).test(line) ||
+    new RegExp(`function\\s+${name}\\s*\\(`).test(line));
+
+export const summarizePhp = (content, mode) => {
+  const lines = content.split('\n');
+  const uses = [];
+  const namespaces = [];
+  const declarations = [];
+  const functions = [];
+  let currentType = null;
+  let braceDepth = 0;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*')) continue;
+
+    const nsMatch = trimmed.match(/^namespace\s+([\w\\]+);?$/);
+    if (nsMatch) { namespaces.push(`namespace ${nsMatch[1]}`); continue; }
+
+    const useMatch = trimmed.match(/^use\s+([\w\\]+)(?:\s+as\s+\w+)?;$/);
+    if (useMatch) { uses.push(useMatch[1]); continue; }
+
+    const typeMatch = trimmed.match(/^(?:abstract|final|\s)*(class|interface|trait|enum)\s+([A-Za-z_]\w*)/);
+    if (typeMatch) {
+      currentType = typeMatch[2];
+      declarations.push(`${typeMatch[1]} ${typeMatch[2]}`);
+    }
+
+    const funcMatch = trimmed.match(/^(?:public|protected|private|static|\s)*function\s+([A-Za-z_]\w*)\s*\(/);
+    if (funcMatch) {
+      const owner = currentType && braceDepth > 0 ? `${currentType}::` : '';
+      functions.push(`${owner}${funcMatch[1]}`);
+    }
+
+    braceDepth += (trimmed.match(/\{/g) ?? []).length;
+    braceDepth -= (trimmed.match(/\}/g) ?? []).length;
+    if (braceDepth <= 0) { currentType = null; braceDepth = 0; }
+  }
+
+  if (mode === 'signatures') {
+    return joinSections([
+      truncateSection('# Declarations', toUniqueLines([...declarations, ...functions]), 2600),
+      truncateSection('# Uses', toUniqueLines(uses, 10), 900),
+    ], 4000);
+  }
+
+  return joinSections([
+    truncateSection('# Namespace', toUniqueLines(namespaces, 2), 300),
+    truncateSection('# Declarations', toUniqueLines(declarations, 20), 1400),
+    truncateSection('# Functions', toUniqueLines(functions, 20), 1800),
+    truncateSection('# Uses', toUniqueLines(uses, 12), 1000),
+  ], 5000);
+};
+
+// ---------------------------------------------------------------------------
+// Swift
+// ---------------------------------------------------------------------------
+
+export const extractSwiftSymbol = (content, symbolName) =>
+  extractBraceBlock(content, symbolName, (line, name) =>
+    new RegExp(`(?:class|struct|enum|protocol|actor)\\s+${name}`).test(line) ||
+    new RegExp(`func\\s+${name}`).test(line));
+
+export const summarizeSwift = (content, mode) => {
+  const lines = content.split('\n');
+  const imports = [];
+  const declarations = [];
+  const functions = [];
+  let currentType = null;
+  let braceDepth = 0;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+
+    const impMatch = trimmed.match(/^import\s+(\w+)$/);
+    if (impMatch) { imports.push(impMatch[1]); continue; }
+
+    const typeMatch = trimmed.match(/^(?:public|private|internal|open|final|\s)*(class|struct|enum|protocol|actor)\s+([A-Za-z_]\w*)/);
+    if (typeMatch) {
+      currentType = typeMatch[2];
+      declarations.push(`${typeMatch[1]} ${typeMatch[2]}`);
+    }
+
+    const funcMatch = trimmed.match(/^(?:(?:public|private|internal|open|override|static|class|@\w+)\s+)*func\s+([A-Za-z_]\w*)/);
+    if (funcMatch) {
+      const owner = currentType && braceDepth > 0 ? `${currentType}::` : '';
+      functions.push(`${owner}${funcMatch[1]}`);
+    }
+
+    braceDepth += (trimmed.match(/\{/g) ?? []).length;
+    braceDepth -= (trimmed.match(/\}/g) ?? []).length;
+    if (braceDepth <= 0) { currentType = null; braceDepth = 0; }
+  }
+
+  if (mode === 'signatures') {
+    return joinSections([
+      truncateSection('# Declarations', toUniqueLines([...declarations, ...functions]), 2600),
+      truncateSection('# Imports', toUniqueLines(imports, 10), 900),
+    ], 4000);
+  }
+
+  return joinSections([
+    truncateSection('# Declarations', toUniqueLines(declarations, 20), 1400),
+    truncateSection('# Functions', toUniqueLines(functions, 20), 1800),
+    truncateSection('# Imports', toUniqueLines(imports, 12), 1000),
+  ], 5000);
+};

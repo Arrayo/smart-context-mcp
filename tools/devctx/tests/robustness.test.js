@@ -9,8 +9,9 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { smartShell } from '../src/tools/smart-shell.js';
 import { smartSearch, isSmartCaseSensitive, walk, searchWithFallback, intentWeights, VALID_INTENTS } from '../src/tools/smart-search.js';
-import { buildIndex, buildIndexIncremental, removeFileFromIndex, queryIndex, queryRelated, isTestFile, isFileStale, reindexFile, persistIndex, loadIndex } from '../src/index.js';
-import { smartRead, clearReadCache } from '../src/tools/smart-read.js';
+import { buildIndex, buildIndexIncremental, removeFileFromIndex, queryIndex, queryRelated, isTestFile, isFileStale, reindexFile, persistIndex, loadIndex, getGraphCoverage } from '../src/index.js';
+import { smartRead, clearReadCache, buildSymbolContext, grepSymbolInFile, extractTypeReferences } from '../src/tools/smart-read.js';
+import { countTokens } from '../src/tokenCounter.js';
 import { setProjectRoot } from '../src/utils/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -236,6 +237,59 @@ describe('metrics rotation (real path)', () => {
   });
 });
 
+describe('metrics reporting', () => {
+  let tmpDir;
+  let tmpMetricsFile;
+  let originalEnv;
+  let originalRoot;
+
+  beforeEach(async () => {
+    tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'devctx-report-'));
+    tmpMetricsFile = path.join(tmpDir, '.devctx', 'metrics.jsonl');
+    originalEnv = process.env.DEVCTX_METRICS_FILE;
+    originalRoot = path.resolve(__dirname, '..', '..', '..');
+    delete process.env.DEVCTX_METRICS_FILE;
+    setProjectRoot(tmpDir);
+  });
+
+  afterEach(async () => {
+    if (originalEnv === undefined) {
+      delete process.env.DEVCTX_METRICS_FILE;
+    } else {
+      process.env.DEVCTX_METRICS_FILE = originalEnv;
+    }
+    setProjectRoot(originalRoot);
+    await fsp.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('defaults metrics path to the active project root', async () => {
+    const { getMetricsFilePath } = await import('../src/metrics.js');
+    assert.equal(getMetricsFilePath(), tmpMetricsFile);
+  });
+
+  it('reports aggregated metrics from jsonl', async () => {
+    await fsp.mkdir(path.dirname(tmpMetricsFile), { recursive: true });
+    const lines = [
+      { tool: 'smart_context', target: 'task-1', rawTokens: 300, compressedTokens: 120, savedTokens: 180, savingsPct: 60, timestamp: '2026-03-26T10:00:00.000Z' },
+      { tool: 'smart_context', target: 'task-2', rawTokens: 200, compressedTokens: 100, savedTokens: 100, savingsPct: 50, timestamp: '2026-03-26T10:05:00.000Z' },
+      { tool: 'smart_search', target: 'query-1', rawTokens: 80, compressedTokens: 60, savedTokens: 20, savingsPct: 25, timestamp: '2026-03-26T10:10:00.000Z' },
+    ];
+    await fsp.writeFile(tmpMetricsFile, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, 'utf8');
+
+    const scriptPath = path.resolve(__dirname, '..', 'scripts', 'report-metrics.js');
+    const { stdout } = await execFile(process.execPath, [scriptPath, '--file', tmpMetricsFile, '--json']);
+    const report = JSON.parse(stdout);
+
+    assert.equal(report.summary.count, 3);
+    assert.equal(report.summary.rawTokens, 580);
+    assert.equal(report.summary.compressedTokens, 280);
+    assert.equal(report.summary.savedTokens, 300);
+    assert.equal(report.summary.tools[0].tool, 'smart_context');
+    assert.equal(report.summary.tools[0].count, 2);
+    assert.equal(report.summary.tools[0].savedTokens, 280);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // graceful shutdown signals
 // ---------------------------------------------------------------------------
@@ -246,7 +300,7 @@ describe('server graceful shutdown', () => {
   it('exits cleanly on SIGTERM', async () => {
     const { spawn } = await import('node:child_process');
 
-    const child = spawn('node', [serverScript], {
+    const child = spawn(process.execPath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -270,7 +324,7 @@ describe('server graceful shutdown', () => {
   it('exits cleanly on SIGINT', async () => {
     const { spawn } = await import('node:child_process');
 
-    const child = spawn('node', [serverScript], {
+    const child = spawn(process.execPath, [serverScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -408,7 +462,7 @@ describe('devctx-init agent rules', () => {
   });
 
   it('generates cursor rule, AGENTS.md and CLAUDE.md', async () => {
-    await execFile('node', [initScript, '--target', tmpDir]);
+    await execFile(process.execPath, [initScript, '--target', tmpDir]);
 
     const cursorRule = await fsp.readFile(path.join(tmpDir, '.cursor', 'rules', 'devctx.mdc'), 'utf8');
     assert.match(cursorRule, /alwaysApply: true/);
@@ -424,17 +478,17 @@ describe('devctx-init agent rules', () => {
   });
 
   it('is idempotent — running twice does not duplicate sections', async () => {
-    await execFile('node', [initScript, '--target', tmpDir]);
+    await execFile(process.execPath, [initScript, '--target', tmpDir]);
     const firstRun = await fsp.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8');
 
-    await execFile('node', [initScript, '--target', tmpDir]);
+    await execFile(process.execPath, [initScript, '--target', tmpDir]);
     const secondRun = await fsp.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8');
 
     assert.equal(firstRun, secondRun);
   });
 
   it('respects --clients flag — only cursor generates cursor rule', async () => {
-    await execFile('node', [initScript, '--target', tmpDir, '--clients', 'cursor']);
+    await execFile(process.execPath, [initScript, '--target', tmpDir, '--clients', 'cursor']);
 
     const cursorRule = await fsp.readFile(path.join(tmpDir, '.cursor', 'rules', 'devctx.mdc'), 'utf8');
     assert.match(cursorRule, /smart_read/);
@@ -450,13 +504,31 @@ describe('devctx-init agent rules', () => {
     const existingContent = '# My Project\n\nSome existing rules.\n';
     await fsp.writeFile(path.join(tmpDir, 'AGENTS.md'), existingContent, 'utf8');
 
-    await execFile('node', [initScript, '--target', tmpDir, '--clients', 'codex']);
+    await execFile(process.execPath, [initScript, '--target', tmpDir, '--clients', 'codex']);
 
     const result = await fsp.readFile(path.join(tmpDir, 'AGENTS.md'), 'utf8');
     assert.match(result, /# My Project/);
     assert.match(result, /Some existing rules/);
     assert.match(result, /devctx:start/);
     assert.match(result, /smart_read/);
+  });
+
+  it('adds .devctx to the target gitignore', async () => {
+    await execFile(process.execPath, [initScript, '--target', tmpDir]);
+
+    const gitignore = await fsp.readFile(path.join(tmpDir, '.gitignore'), 'utf8');
+    assert.match(gitignore, /^\.devctx\/$/m);
+  });
+
+  it('does not duplicate .devctx in gitignore', async () => {
+    await fsp.writeFile(path.join(tmpDir, '.gitignore'), '.devctx/\n', 'utf8');
+
+    await execFile(process.execPath, [initScript, '--target', tmpDir]);
+    await execFile(process.execPath, [initScript, '--target', tmpDir]);
+
+    const gitignore = await fsp.readFile(path.join(tmpDir, '.gitignore'), 'utf8');
+    const matches = gitignore.match(/^\.devctx\/$/gm) ?? [];
+    assert.equal(matches.length, 1);
   });
 });
 
@@ -844,6 +916,216 @@ describe('smart_read response cache', () => {
 });
 
 // ---------------------------------------------------------------------------
+// smart_read symbol context
+// ---------------------------------------------------------------------------
+
+describe('smart_read symbol context', () => {
+  const fixtureRoot = path.resolve(__dirname, '..', 'evals', 'fixtures', 'sample-project');
+  let tmpDir;
+  let originalRoot;
+
+  beforeEach(async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-symctx-'));
+    fs.cpSync(fixtureRoot, tmpDir, { recursive: true, filter: (src) => !src.includes('.devctx') });
+    originalRoot = process.env.DEVCTX_PROJECT_ROOT;
+    setProjectRoot(tmpDir);
+    const index = buildIndex(tmpDir);
+    await persistIndex(index, tmpDir);
+    clearReadCache();
+  });
+
+  afterEach(() => {
+    setProjectRoot(originalRoot ?? path.resolve(__dirname, '..', '..', '..'));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns callers from importedBy files', async () => {
+    const result = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+    });
+
+    assert.ok(result.context, 'response should include context field');
+    assert.ok(result.context.callers > 0, 'should find callers via graph');
+    assert.ok(result.content.includes('--- callers ---'), 'content should have callers section');
+    assert.ok(result.content.includes('middleware'), 'callers should include middleware');
+  });
+
+  it('returns tests section', async () => {
+    const result = await smartRead({
+      filePath: path.join(tmpDir, 'src/auth/middleware.js'),
+      mode: 'symbol',
+      symbol: 'AuthMiddleware',
+      context: true,
+    });
+
+    assert.ok(result.context);
+    assert.ok(result.context.tests > 0, 'should find test files via graph');
+    assert.ok(result.content.includes('--- tests ---'), 'content should have tests section');
+  });
+
+  it('returns types section for type references', async () => {
+    const typedFile = path.join(tmpDir, 'src/api/typed.ts');
+    fs.writeFileSync(typedFile, [
+      'import { UserProfile } from "../models/user.js";',
+      'export function getUser(id: string): UserProfile {',
+      '  return { id, name: "test" };',
+      '}',
+    ].join('\n'));
+
+    const userModel = path.join(tmpDir, 'src/models/user.js');
+    const existing = fs.readFileSync(userModel, 'utf8');
+    fs.writeFileSync(userModel, existing + '\nexport class UserProfile { constructor(id, name) { this.id = id; this.name = name; } }\n');
+
+    const index = buildIndex(tmpDir);
+    await persistIndex(index, tmpDir);
+
+    const result = await smartRead({
+      filePath: typedFile,
+      mode: 'symbol',
+      symbol: 'getUser',
+      context: true,
+    });
+
+    assert.ok(result.context);
+    assert.ok(result.context.types > 0, 'should find referenced types');
+    assert.ok(result.content.includes('--- types ---'), 'content should have types section');
+    assert.ok(result.content.includes('UserProfile'), 'types should include UserProfile');
+  });
+
+  it('returns empty sections with hint when no index', async () => {
+    const indexPath = path.join(tmpDir, '.devctx', 'index.json');
+    if (fs.existsSync(indexPath)) fs.unlinkSync(indexPath);
+
+    const result = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+    });
+
+    assert.ok(result.context);
+    assert.equal(result.context.callers, 0);
+    assert.equal(result.context.tests, 0);
+    assert.equal(result.context.types, 0);
+    assert.ok(result.contextHints?.length > 0, 'should include hint about missing index');
+    assert.ok(result.contextHints[0].includes('build_index'));
+  });
+
+  it('context is ignored on non-symbol mode', async () => {
+    const result = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'outline',
+      context: true,
+    });
+
+    assert.ok(!result.context, 'context field should not be present for outline mode');
+    assert.ok(!result.content.includes('--- callers ---'));
+  });
+
+  it('maxTokens applies to combined content including context', async () => {
+    const noBudget = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+    });
+    const fullTokens = countTokens(noBudget.content);
+
+    const withBudget = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+      maxTokens: Math.max(10, Math.floor(fullTokens / 2)),
+    });
+
+    assert.ok(countTokens(withBudget.content) <= Math.floor(fullTokens / 2),
+      'combined content should respect maxTokens budget');
+    assert.ok(withBudget.content.includes('[truncated'),
+      'should be truncated when context pushes over budget');
+  });
+
+  it('metrics reflect content including context sections', async () => {
+    const result = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+    });
+
+    const actualTokens = countTokens(result.content);
+    assert.equal(result.metrics.compressedTokens, actualTokens,
+      'metrics.compressedTokens should match actual content tokens');
+  });
+
+  it('does not set cached=true when context=true', async () => {
+    await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+    });
+
+    const second = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+    });
+
+    assert.ok(!second.cached, 'cached must not be true when context sections are rebuilt');
+    assert.ok(second.context, 'context field should still be present');
+  });
+
+  it('includes graphCoverage with full coverage for JS files', async () => {
+    const result = await smartRead({
+      filePath: path.join(tmpDir, 'src/utils/jwt.js'),
+      mode: 'symbol',
+      symbol: 'verifyJwt',
+      context: true,
+    });
+    assert.ok(result.graphCoverage, 'should include graphCoverage');
+    assert.equal(result.graphCoverage.imports, 'full');
+    assert.equal(result.graphCoverage.tests, 'full');
+  });
+});
+
+describe('getGraphCoverage', () => {
+  it('returns full for JS/TS/Python/Go', () => {
+    for (const ext of ['.js', '.ts', '.tsx', '.py', '.go']) {
+      const cov = getGraphCoverage(ext);
+      assert.equal(cov.imports, 'full', `${ext} imports should be full`);
+      assert.equal(cov.tests, 'full', `${ext} tests should be full`);
+    }
+  });
+
+  it('returns partial for C#/Kotlin/PHP/Swift', () => {
+    for (const ext of ['.cs', '.kt', '.php', '.swift']) {
+      const cov = getGraphCoverage(ext);
+      assert.equal(cov.imports, 'partial', `${ext} imports should be partial`);
+      assert.equal(cov.tests, 'partial', `${ext} tests should be partial`);
+    }
+  });
+
+  it('returns none/partial for Rust/Java', () => {
+    for (const ext of ['.rs', '.java']) {
+      const cov = getGraphCoverage(ext);
+      assert.equal(cov.imports, 'none', `${ext} imports should be none`);
+      assert.equal(cov.tests, 'partial', `${ext} tests should be partial`);
+    }
+  });
+
+  it('returns none/none for unknown extensions', () => {
+    const cov = getGraphCoverage('.txt');
+    assert.equal(cov.imports, 'none');
+    assert.equal(cov.tests, 'none');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // smart_search intent-aware ranking
 // ---------------------------------------------------------------------------
 
@@ -910,7 +1192,7 @@ describe('buildIndex', () => {
 
   it('extracts JS symbols from fixture project', () => {
     const index = buildIndex(fixtureRoot);
-    assert.ok(index.version === 2);
+    assert.ok(index.version === 4);
     assert.ok(Object.keys(index.files).length > 0);
     assert.ok(Object.keys(index.invertedIndex).length > 0);
 
@@ -1402,7 +1684,7 @@ describe('indexFreshness detects stale files', () => {
 
   afterEach(async () => {
     const { projectRoot } = await import('../src/utils/paths.js');
-    if (projectRoot === tmpDir) setProjectRoot(path.resolve(__dirname, '..'));
+    if (projectRoot === tmpDir) setProjectRoot(path.resolve(__dirname, '..', '..', '..'));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -1421,7 +1703,7 @@ describe('indexFreshness detects stale files', () => {
 // smart_context
 // ---------------------------------------------------------------------------
 
-import { smartContext, inferIntent, extractSearchQueries, extractSymbolCandidates, getChangedFiles } from '../src/tools/smart-context.js';
+import { smartContext, inferIntent, extractSearchQueries, extractSymbolCandidates, getChangedFiles, allocateReads } from '../src/tools/smart-context.js';
 
 describe('smart_context response contract', () => {
   const fixtureRoot = path.resolve(__dirname, '..', 'evals', 'fixtures', 'sample-project');
@@ -1457,7 +1739,31 @@ describe('smart_context response contract', () => {
       assert.ok(typeof item.file === 'string');
       assert.ok(typeof item.role === 'string');
       assert.ok(typeof item.readMode === 'string');
-      assert.ok(typeof item.content === 'string');
+      assert.ok(typeof item.reasonIncluded === 'string');
+      assert.ok(Array.isArray(item.evidence));
+      if (item.readMode === 'index-only') {
+        assert.ok(item.content == null, 'index-only items should not include content');
+      } else {
+        assert.ok(typeof item.content === 'string');
+      }
+    }
+  });
+
+  it('includes evidence metadata for why files were selected', async () => {
+    const result = await smartContext({ task: 'debug AuthMiddleware verifyJwt', detail: 'minimal' });
+    const primary = result.context.find((item) => item.role === 'primary');
+    const related = result.context.find(
+      (item) => item.role !== 'primary' && item.evidence.some((e) => ['testOf', 'dependencyOf', 'dependentOf'].includes(e.type)),
+    );
+
+    assert.ok(primary, 'should include a primary file');
+    assert.ok(primary.evidence.some((e) => e.type === 'searchHit' || e.type === 'symbolMatch'));
+    assert.ok(primary.reasonIncluded.length > 0);
+
+    if (related) {
+      assert.ok(related.reasonIncluded.length > 0);
+    } else {
+      assert.equal(result.graph.primaryImports.length + result.graph.tests.length + result.graph.dependents.length, 0);
     }
   });
 
@@ -1475,6 +1781,13 @@ describe('smart_context response contract', () => {
     assert.ok(Array.isArray(result.graph.tests));
     assert.ok(Array.isArray(result.graph.dependents));
     assert.ok(Array.isArray(result.graph.neighbors));
+  });
+
+  it('includes graphCoverage with imports and tests levels', async () => {
+    const result = await smartContext({ task: 'debug AuthMiddleware' });
+    assert.ok(result.graphCoverage, 'should include graphCoverage');
+    assert.ok(['full', 'partial', 'none'].includes(result.graphCoverage.imports));
+    assert.ok(['full', 'partial', 'none'].includes(result.graphCoverage.tests));
   });
 });
 
@@ -1539,8 +1852,118 @@ describe('smart_context query extraction', () => {
     assert.ok(!queries.includes('debug'));
     assert.ok(queries.includes('authentication'));
   });
+
+  it('filters low-signal imperative verbs from sentence-start queries', () => {
+    const queries = extractSearchQueries('Find authentication flow in auth middleware');
+    assert.ok(!queries.includes('Find'));
+    assert.ok(!queries.includes('find'));
+    assert.equal(queries[0], 'authentication');
+  });
+
+  it('keeps code-like symbols ahead of free-text keywords', () => {
+    const queries = extractSearchQueries('Find loginHandler in the authentication flow');
+    assert.equal(queries[0], 'loginHandler');
+    assert.ok(!queries.includes('Find'));
+  });
+
+  it('drops generic verbs from natural prompts while keeping domain words', () => {
+    const queries = extractSearchQueries('where does token validation happen in the auth flow?');
+    assert.ok(!queries.includes('happen'));
+    assert.ok(queries.includes('auth'));
+    assert.ok(queries.includes('token'));
+  });
+
+  it('filters onboarding meta words while keeping endpoint domain terms', () => {
+    const queries = extractSearchQueries('I am onboarding: what file handles user endpoints?');
+    assert.ok(!queries.includes('onboarding'));
+    assert.ok(!queries.includes('file'));
+    assert.ok(queries.includes('user'));
+  });
+
+  it('expands hyphenated create-user prompts into createUser and drops failure-path filler', () => {
+    const queries = extractSearchQueries('which file handles the create-user failure path?');
+    assert.equal(queries[0], 'createUser');
+    assert.ok(!queries.includes('path'));
+  });
+
+  it('drops app/load filler while expanding JWT secret prompts', () => {
+    const queries = extractSearchQueries('where does the app load the JWT secret?');
+    assert.equal(queries[0], 'jwtSecret');
+    assert.ok(!queries.includes('app'));
+    assert.ok(!queries.includes('JWT'));
+    assert.ok(!queries.includes('load'));
+  });
+
+  it('drops app filler from explore prompts', () => {
+    const queries = extractSearchQueries('where does email-related logic live across the app?');
+    assert.ok(!queries.includes('app'));
+    assert.equal(queries[0], 'email');
+  });
 });
 
+describe('smart_context natural prompt retrieval', () => {
+  const fixtureRoot = path.resolve(__dirname, '..', 'evals', 'fixtures', 'sample-project');
+  let originalRoot;
+
+  beforeEach(async () => {
+    originalRoot = (await import('../src/utils/paths.js')).projectRoot;
+    setProjectRoot(fixtureRoot);
+    const index = buildIndex(fixtureRoot);
+    await persistIndex(index, fixtureRoot);
+  });
+
+  afterEach(() => {
+    setProjectRoot(originalRoot);
+  });
+
+  it('finds auth middleware from a natural validation prompt', async () => {
+    const result = await smartContext({ task: 'where does token validation happen in the auth flow?' });
+    const files = result.context.map((item) => item.file);
+    assert.ok(files.includes('src/auth/middleware.js'));
+    const primaryFiles = result.context.filter((item) => item.role === 'primary').map((item) => item.file);
+    assert.deepEqual(primaryFiles, ['src/auth/middleware.js']);
+  });
+
+  it('finds the user API from a review-style prompt', async () => {
+    const result = await smartContext({ task: 'review the user creation API flow' });
+    const files = result.context.map((item) => item.file);
+    assert.ok(files.includes('src/api/users.js'));
+    const primaryFiles = result.context.filter((item) => item.role === 'primary').map((item) => item.file);
+    assert.deepEqual(primaryFiles, ['src/api/users.js']);
+  });
+
+  it('finds the deployment container file from an onboarding prompt', async () => {
+    const result = await smartContext({ task: 'I am onboarding: which file defines the deployment container?' });
+    const files = result.context.map((item) => item.file);
+    assert.ok(files.includes('Dockerfile'));
+  });
+
+  it('finds the user API from a create-user failure prompt', async () => {
+    const result = await smartContext({ task: 'which file handles the create-user failure path?' });
+    const files = result.context.map((item) => item.file);
+    assert.ok(files.includes('src/api/users.js'));
+    const primaryFiles = result.context.filter((item) => item.role === 'primary').map((item) => item.file);
+    assert.deepEqual(primaryFiles, ['src/api/users.js']);
+  });
+
+  it('finds config for JWT secret prompts', async () => {
+    const result = await smartContext({ task: 'where does the app load the JWT secret?' });
+    const files = result.context.map((item) => item.file);
+    assert.ok(files.includes('config/app.yaml'));
+    const primaryFiles = result.context.filter((item) => item.role === 'primary').map((item) => item.file);
+    assert.deepEqual(primaryFiles, ['config/app.yaml']);
+  });
+
+  it('keeps email exploration primaries on expected files', async () => {
+    const result = await smartContext({ task: 'where does email-related logic live across the app?' });
+    const files = result.context.map((item) => item.file);
+    assert.ok(files.includes('services/notification.py'));
+    assert.ok(files.includes('src/api/users.js'));
+    const primaryFiles = result.context.filter((item) => item.role === 'primary').map((item) => item.file);
+    assert.equal(primaryFiles.length, 1);
+    assert.ok(['services/notification.py', 'src/api/users.js'].includes(primaryFiles[0]));
+  });
+});
 describe('smart_context entry file', () => {
   const fixtureRoot = path.resolve(__dirname, '..', 'evals', 'fixtures', 'sample-project');
   let originalRoot;
@@ -1632,7 +2055,7 @@ describe('smart_context maxTokens budget', () => {
     const result = await smartContext({ task: 'debug AuthMiddleware', maxTokens: 2000 });
     const primaries = result.context.filter((c) => c.role === 'primary');
     for (const p of primaries) {
-      assert.equal(p.readMode, 'signatures', 'primary files should use signatures on tight budget');
+      assert.ok(['index-only', 'signatures'].includes(p.readMode), 'primary files should stay compact on tight budget');
     }
   });
 });
@@ -1888,6 +2311,335 @@ describe('smart_context diff mode integration', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// C#, Kotlin, PHP, Swift support
+// ---------------------------------------------------------------------------
+
+describe('smart_read C# support', () => {
+  it('outline extracts class, interface, enum, record and namespace', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.cs', mode: 'outline' });
+    assert.match(result.content, /SampleService/);
+    assert.match(result.content, /IUserService/);
+    assert.match(result.content, /Example\.Services/);
+    assert.strictEqual(result.parser, 'heuristic');
+  });
+
+  it('symbol extracts a C# method', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.cs', mode: 'symbol', symbol: 'CreateUser' });
+    assert.match(result.content, /CreateUser/);
+    assert.match(result.content, /Guid/);
+  });
+
+  it('index extracts C# symbols with correct kind', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-cs-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.cs'), fs.readFileSync(path.resolve(__dirname, '..', 'fixtures', 'formats', 'SampleService.cs')));
+    const index = buildIndex(tmpDir);
+    const classHits = queryIndex(index, 'SampleService');
+    assert.ok(classHits.length > 0, 'should find SampleService');
+    assert.ok(classHits.some((h) => h.kind === 'class'));
+    const ifaceHits = queryIndex(index, 'IUserService');
+    assert.ok(ifaceHits.some((h) => h.kind === 'interface'), 'interface should have kind=interface');
+    const enumHits = queryIndex(index, 'UserRole');
+    assert.ok(enumHits.some((h) => h.kind === 'enum'), 'enum should have kind=enum');
+    const recordHits = queryIndex(index, 'UserDto');
+    assert.ok(recordHits.some((h) => h.kind === 'record'), 'record should have kind=record');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('index includes C# file with using statements', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-cs-imp-'));
+    fs.writeFileSync(path.join(tmpDir, 'Empty.cs'), 'using System;\nusing System.Linq;\n');
+    const index = buildIndex(tmpDir);
+    assert.ok(index.files['Empty.cs'], 'file with only usings should be indexed');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe('smart_read Kotlin support', () => {
+  it('outline extracts interface, object, data class and fun', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.kt', mode: 'outline' });
+    assert.match(result.content, /UserDto/);
+    assert.match(result.content, /ServiceRegistry/);
+    assert.match(result.content, /createUser/);
+    assert.strictEqual(result.parser, 'heuristic');
+  });
+
+  it('symbol extracts a Kotlin function', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.kt', mode: 'symbol', symbol: 'createUser' });
+    assert.match(result.content, /createUser/);
+    assert.match(result.content, /UUID/);
+  });
+
+  it('index extracts Kotlin symbols with correct kind', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-kt-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.kt'), fs.readFileSync(path.resolve(__dirname, '..', 'fixtures', 'formats', 'SampleService.kt')));
+    const index = buildIndex(tmpDir);
+    const classHits = queryIndex(index, 'SampleService');
+    assert.ok(classHits.length > 0, 'should find SampleService');
+    assert.ok(classHits.some((h) => h.kind === 'class'));
+    const ifaceHits = queryIndex(index, 'UserService');
+    assert.ok(ifaceHits.some((h) => h.kind === 'interface'), 'interface should have kind=interface');
+    const objHits = queryIndex(index, 'ServiceRegistry');
+    assert.ok(objHits.some((h) => h.kind === 'object'), 'object should have kind=object');
+    const funHits = queryIndex(index, 'topLevelHelper');
+    assert.ok(funHits.some((h) => h.kind === 'function'));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('index includes Kotlin file with import statements', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-kt-imp-'));
+    fs.writeFileSync(path.join(tmpDir, 'Empty.kt'), 'import java.util.UUID\nimport kotlin.collections.List\n');
+    const index = buildIndex(tmpDir);
+    assert.ok(index.files['Empty.kt'], 'file with only imports should be indexed');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe('smart_read PHP support', () => {
+  it('outline extracts class, interface, trait and function', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.php', mode: 'outline' });
+    assert.match(result.content, /SampleService/);
+    assert.match(result.content, /UserServiceContract/);
+    assert.match(result.content, /createUser/);
+    assert.strictEqual(result.parser, 'heuristic');
+  });
+
+  it('symbol extracts a PHP method', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.php', mode: 'symbol', symbol: 'createUser' });
+    assert.match(result.content, /createUser/);
+    assert.match(result.content, /function/);
+  });
+
+  it('index extracts PHP symbols with correct kind', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-php-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.php'), fs.readFileSync(path.resolve(__dirname, '..', 'fixtures', 'formats', 'SampleService.php')));
+    const index = buildIndex(tmpDir);
+    const classHits = queryIndex(index, 'SampleService');
+    assert.ok(classHits.length > 0, 'should find SampleService');
+    assert.ok(classHits.some((h) => h.kind === 'class'));
+    const ifaceHits = queryIndex(index, 'UserServiceContract');
+    assert.ok(ifaceHits.some((h) => h.kind === 'interface'), 'interface should have kind=interface');
+    const traitHits = queryIndex(index, 'Loggable');
+    assert.ok(traitHits.some((h) => h.kind === 'trait'), 'trait should have kind=trait');
+    const roleHits = queryIndex(index, 'UserRole');
+    assert.ok(roleHits.some((h) => h.kind === 'class'), 'abstract class should have kind=class');
+    const funHits = queryIndex(index, 'helperFunction');
+    assert.ok(funHits.length > 0, 'should find helperFunction');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('index includes PHP file with use statements', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-php-imp-'));
+    fs.writeFileSync(path.join(tmpDir, 'Empty.php'), '<?php\nuse App\\Models\\User;\nuse App\\Services\\Logger;\n');
+    const index = buildIndex(tmpDir);
+    assert.ok(index.files['Empty.php'], 'file with only use statements should be indexed');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe('smart_read Swift support', () => {
+  it('outline extracts protocol, actor, struct and func', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.swift', mode: 'outline' });
+    assert.match(result.content, /UserDto/);
+    assert.match(result.content, /SessionManager/);
+    assert.match(result.content, /createUser/);
+    assert.strictEqual(result.parser, 'heuristic');
+  });
+
+  it('symbol extracts a Swift function', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/fixtures/formats/SampleService.swift', mode: 'symbol', symbol: 'createUser' });
+    assert.match(result.content, /createUser/);
+    assert.match(result.content, /func/);
+  });
+
+  it('index extracts Swift symbols with correct kind', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-swift-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.swift'), fs.readFileSync(path.resolve(__dirname, '..', 'fixtures', 'formats', 'SampleService.swift')));
+    const index = buildIndex(tmpDir);
+    const classHits = queryIndex(index, 'SampleService');
+    assert.ok(classHits.length > 0, 'should find SampleService');
+    assert.ok(classHits.some((h) => h.kind === 'class'));
+    const protoHits = queryIndex(index, 'UserServiceProtocol');
+    assert.ok(protoHits.some((h) => h.kind === 'protocol'), 'protocol should have kind=protocol');
+    const actorHits = queryIndex(index, 'SessionManager');
+    assert.ok(actorHits.some((h) => h.kind === 'actor'), 'actor should have kind=actor');
+    const enumHits = queryIndex(index, 'UserRole');
+    assert.ok(enumHits.some((h) => h.kind === 'enum'), 'enum should have kind=enum');
+    const structHits = queryIndex(index, 'UserDto');
+    assert.ok(structHits.some((h) => h.kind === 'struct'), 'struct should have kind=struct');
+    const funHits = queryIndex(index, 'topLevelHelper');
+    assert.ok(funHits.length > 0, 'should find topLevelHelper');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('index includes Swift file with import statements', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-swift-imp-'));
+    fs.writeFileSync(path.join(tmpDir, 'Empty.swift'), 'import Foundation\nimport UIKit\n');
+    const index = buildIndex(tmpDir);
+    assert.ok(index.files['Empty.swift'], 'file with only imports should be indexed');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe('new language testOf resolution', () => {
+  it('links C# test file to source via inferTestTarget', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-testof-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.cs'), 'public class Service { public void Run() {} }\n');
+    fs.writeFileSync(path.join(tmpDir, 'ServiceTests.cs'), 'public class ServiceTests { public void TestRun() {} }\n');
+    const index = buildIndex(tmpDir);
+    const related = queryRelated(index, 'Service.cs');
+    assert.ok(related.tests.includes('ServiceTests.cs'), 'test file should be linked via testOf');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('links Kotlin test file to source via inferTestTarget', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-testof-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.kt'), 'class Service { fun run() {} }\n');
+    fs.writeFileSync(path.join(tmpDir, 'ServiceTest.kt'), 'class ServiceTest { fun testRun() {} }\n');
+    const index = buildIndex(tmpDir);
+    const related = queryRelated(index, 'Service.kt');
+    assert.ok(related.tests.includes('ServiceTest.kt'), 'test file should be linked via testOf');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('links PHP test file to source via inferTestTarget', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-testof-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.php'), '<?php\nclass Service {\n    function run() {}\n}\n');
+    fs.writeFileSync(path.join(tmpDir, 'ServiceTest.php'), '<?php\nclass ServiceTest {\n    function testRun() {}\n}\n');
+    const index = buildIndex(tmpDir);
+    const related = queryRelated(index, 'Service.php');
+    assert.ok(related.tests.includes('ServiceTest.php'), 'test file should be linked via testOf');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('links Swift test file to source via inferTestTarget', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-testof-'));
+    fs.writeFileSync(path.join(tmpDir, 'Service.swift'), 'class Service { func run() {} }\n');
+    fs.writeFileSync(path.join(tmpDir, 'ServiceTests.swift'), 'class ServiceTests { func testRun() {} }\n');
+    const index = buildIndex(tmpDir);
+    const related = queryRelated(index, 'Service.swift');
+    assert.ok(related.tests.includes('ServiceTests.swift'), 'test file should be linked via testOf');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe('unified confidence contract', () => {
+  it('smart_read outline returns confidence block', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'outline' });
+    assert.ok(result.confidence, 'confidence block must exist');
+    assert.strictEqual(result.confidence.parser, 'ast');
+    assert.strictEqual(result.confidence.truncated, false);
+    assert.strictEqual(result.confidence.cached, false);
+  });
+
+  it('smart_read full returns parser=raw in confidence', async () => {
+    const result = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'full' });
+    assert.strictEqual(result.confidence.parser, 'raw');
+  });
+
+  it('smart_read symbol with context includes graphCoverage in confidence', async () => {
+    const result = await smartRead({
+      filePath: 'tools/devctx/src/server.js',
+      mode: 'symbol',
+      symbol: 'createDevctxServer',
+      context: true,
+    });
+    assert.ok(result.confidence.graphCoverage, 'confidence.graphCoverage must exist');
+    assert.ok(['full', 'partial', 'none'].includes(result.confidence.graphCoverage.imports));
+    assert.ok(['full', 'partial', 'none'].includes(result.confidence.graphCoverage.tests));
+  });
+
+  it('smart_search returns confidence with level and indexFreshness', async () => {
+    const result = await smartSearch({ query: 'createDevctxServer', cwd: 'tools/devctx/src' });
+    assert.ok(result.confidence, 'confidence block must exist');
+    assert.ok(['high', 'medium', 'low'].includes(result.confidence.level));
+    assert.ok(['fresh', 'stale', 'unavailable'].includes(result.confidence.indexFreshness));
+    assert.strictEqual(result.confidence.level, result.retrievalConfidence);
+    assert.strictEqual(result.confidence.indexFreshness, result.indexFreshness);
+  });
+
+  it('smart_context returns confidence with indexFreshness and graphCoverage', async () => {
+    const result = await smartContext({ task: 'find createDevctxServer function' });
+    assert.ok(result.confidence, 'confidence block must exist');
+    assert.ok(['fresh', 'stale', 'unavailable'].includes(result.confidence.indexFreshness));
+    assert.ok(result.confidence.graphCoverage);
+    assert.strictEqual(result.confidence.indexFreshness, result.indexFreshness);
+    assert.deepStrictEqual(result.confidence.graphCoverage, result.graphCoverage);
+  });
+
+  it('smart_shell returns confidence with blocked and timedOut', async () => {
+    const result = await smartShell({ command: 'pwd' });
+    assert.ok(result.confidence, 'confidence block must exist');
+    assert.strictEqual(result.confidence.blocked, false);
+    assert.strictEqual(result.confidence.timedOut, false);
+  });
+
+  it('smart_shell blocked command sets confidence.blocked=true', async () => {
+    const result = await smartShell({ command: 'rm -rf /' });
+    assert.strictEqual(result.confidence.blocked, true);
+    assert.strictEqual(result.confidence.timedOut, false);
+  });
+
+  it('smart_read_batch propagates confidence per item', async () => {
+    const result = await smartReadBatch({
+      files: [{ path: 'tools/devctx/src/server.js', mode: 'outline' }],
+    });
+    assert.ok(result.results[0].confidence, 'per-item confidence must exist');
+    assert.strictEqual(result.results[0].confidence.parser, 'ast');
+  });
+});
+
+describe('index signatures', () => {
+  const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+
+  it('queryIndex returns signature and snippet for JS symbols', () => {
+    setProjectRoot(REPO_ROOT);
+    const index = buildIndex(REPO_ROOT);
+    const hits = queryIndex(index, 'createDevctxServer');
+    assert.ok(hits.length > 0, 'should find createDevctxServer');
+    const hit = hits[0];
+    assert.ok(hit.signature, 'signature must be present');
+    assert.ok(hit.signature.includes('createDevctxServer'), 'signature should contain the symbol name');
+    assert.ok(hit.signature.length <= 201, 'signature must respect max length');
+    assert.ok(hit.snippet, 'snippet must be present');
+    assert.ok(hit.snippet.includes('createDevctxServer'), 'snippet should contain the symbol name');
+  });
+
+  it('queryIndex returns signature for Python symbols', () => {
+    setProjectRoot(REPO_ROOT);
+    const index = buildIndex(REPO_ROOT);
+    const hits = queryIndex(index, 'UserService');
+    const pyHit = hits.find((h) => h.path.endsWith('.py'));
+    if (pyHit) {
+      assert.ok(pyHit.signature, 'Python symbol should have a signature');
+      assert.ok(pyHit.signature.includes('UserService'));
+    }
+  });
+
+  it('index stores signatures and snippets in fileEntries', () => {
+    setProjectRoot(REPO_ROOT);
+    const index = buildIndex(REPO_ROOT);
+    const serverEntry = index.files['tools/devctx/src/server.js'];
+    assert.ok(serverEntry, 'server.js must be indexed');
+    const symWithSig = serverEntry.symbols.find((s) => s.signature);
+    assert.ok(symWithSig, 'at least one symbol should have a signature');
+    assert.ok(typeof symWithSig.signature === 'string');
+    assert.ok(symWithSig.snippet, 'at least one symbol should have a snippet');
+    assert.ok(typeof symWithSig.snippet === 'string');
+  });
+
+  it('smart_context includes symbolSignatures from index', async () => {
+    setProjectRoot(REPO_ROOT);
+    buildIndex(REPO_ROOT);
+    const result = await smartContext({ task: 'find createDevctxServer' });
+    const primary = result.context.find((c) => c.role === 'primary' && c.symbolSignatures?.length > 0);
+    if (primary) {
+      assert.ok(Array.isArray(primary.symbolSignatures));
+      assert.ok(primary.symbolSignatures.every((s) => typeof s === 'string'));
+    }
+  });
+});
+
 describe('persistMetrics fire-and-forget', () => {
   it('does not throw when metrics dir is unwritable', async () => {
     const { persistMetrics, buildMetrics } = await import('../src/metrics.js');
@@ -1904,5 +2656,184 @@ describe('persistMetrics fire-and-forget', () => {
         process.env.DEVCTX_METRICS_FILE = original;
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// smart_context detail and include modes
+// ---------------------------------------------------------------------------
+
+describe('smart_context detail and include modes', () => {
+  const fixtureRoot = path.resolve(__dirname, '..', 'evals', 'fixtures', 'sample-project');
+  let originalRoot;
+
+  beforeEach(async () => {
+    originalRoot = (await import('../src/utils/paths.js')).projectRoot;
+    setProjectRoot(fixtureRoot);
+    const index = buildIndex(fixtureRoot);
+    await persistIndex(index, fixtureRoot);
+  });
+
+  afterEach(() => {
+    setProjectRoot(originalRoot);
+  });
+
+  it('minimal mode returns index-first context with compact metadata', async () => {
+    const result = await smartContext({ task: 'debug AuthMiddleware verifyJwt', detail: 'minimal' });
+    assert.ok(result.context.length > 0);
+    const nonSymbolDetail = result.context.filter((c) => c.role !== 'symbolDetail');
+    for (const item of nonSymbolDetail) {
+      assert.ok(['index-only', 'signatures-only'].includes(item.readMode));
+      if (item.readMode === 'signatures-only') {
+        assert.equal(item.content, '(omitted — see symbolDetail)');
+      } else {
+        assert.ok(!item.content, 'minimal mode should not include content unless dedup placeholder is used');
+      }
+    }
+    const withSymbols = result.context.filter((c) => c.symbols || c.symbolSignatures);
+    assert.ok(withSymbols.length > 0, 'at least some items should have symbols or signatures');
+    const withPreviews = result.context.filter((c) => Array.isArray(c.symbolPreviews) && c.symbolPreviews.length > 0);
+    assert.ok(withPreviews.length > 0, 'minimal mode should include symbol previews from the index');
+    assert.ok(result.metrics.detailMode === 'minimal');
+  });
+
+  it('include without content omits content field', async () => {
+    const result = await smartContext({
+      task: 'debug AuthMiddleware',
+      include: ['graph', 'hints'],
+    });
+    assert.ok(result.context.length > 0);
+    for (const item of result.context) {
+      assert.ok(!item.content, 'should not include content when omitted from include');
+    }
+    assert.ok(!result.metrics.include.includes('content'));
+  });
+
+  it('include without graph omits graph fields', async () => {
+    const result = await smartContext({
+      task: 'debug AuthMiddleware',
+      include: ['content', 'hints'],
+    });
+    assert.ok(!result.graph, 'should not include graph when omitted');
+    assert.ok(!result.graphCoverage, 'should not include graphCoverage when omitted');
+  });
+
+  it('include without hints omits hints field', async () => {
+    const result = await smartContext({
+      task: 'debug AuthMiddleware',
+      include: ['content', 'graph'],
+    });
+    assert.ok(!result.hints, 'should not include hints when omitted');
+  });
+
+  it('balanced mode (default) includes content', async () => {
+    const result = await smartContext({ task: 'debug AuthMiddleware' });
+    assert.ok(result.context.length > 0);
+    const withContent = result.context.filter((c) => c.content && c.content.length > 10);
+    assert.ok(withContent.length > 0, 'balanced mode should include content for some files');
+    assert.ok(result.metrics.detailMode === 'balanced');
+  });
+
+  it('balanced mode keeps strong entry-file primaries index-first when previews already cover the file well', async () => {
+    const result = await smartContext({
+      task: 'review the auth flow entry point and main middleware',
+      entryFile: 'src/auth/middleware.js',
+    });
+    const primary = result.context.find((c) => c.role === 'primary' && c.file === 'src/auth/middleware.js');
+    assert.ok(primary, 'should include the entry file as primary');
+    assert.equal(primary.readMode, 'index-only');
+    assert.ok(!primary.content, 'balanced mode should skip content when index previews are already strong');
+  });
+
+  it('balanced mode still reads content for primaries with weak index metadata', async () => {
+    const result = await smartContext({
+      task: 'where is the database wired from configuration?',
+      entryFile: 'config/database.json',
+    });
+    const primary = result.context.find((c) => c.role === 'primary' && c.file === 'config/database.json');
+    assert.ok(primary, 'should include the config file as primary');
+    assert.notEqual(primary.readMode, 'index-only');
+    assert.ok(primary.content && primary.content.length > 0, 'balanced mode should still read content when the index has little signal');
+  });
+
+  it('balanced mode adds fallback symbol previews to entry-file primary items without explicit symbol matches', async () => {
+    const result = await smartContext({
+      task: 'review auth flow',
+      entryFile: 'src/auth/middleware.js',
+    });
+    const primary = result.context.find((c) => c.role === 'primary' && c.file === 'src/auth/middleware.js');
+    assert.ok(primary, 'should include the entry file as primary');
+    assert.ok(Array.isArray(primary.symbolPreviews) && primary.symbolPreviews.length > 0, 'primary item should include fallback symbol previews');
+    assert.ok(primary.symbolPreviews.length <= 2, 'primary preview fallback should stay compact');
+  });
+
+  it('balanced mode adds compact fallback previews to dependency items', async () => {
+    const result = await smartContext({
+      task: 'review auth flow',
+      entryFile: 'src/auth/middleware.js',
+    });
+    const dependencyWithPreview = result.context.find(
+      (c) => c.role === 'dependency' && Array.isArray(c.symbolPreviews) && c.symbolPreviews.length > 0,
+    );
+    assert.ok(dependencyWithPreview, 'dependency item should include a compact symbol preview');
+    assert.ok(dependencyWithPreview.symbolPreviews.length <= 1, 'dependency preview fallback should stay minimal');
+  });
+
+  it('deep mode reads full content blocks', async () => {
+    const result = await smartContext({ task: 'debug AuthMiddleware', detail: 'deep' });
+    assert.ok(result.context.length > 0);
+    const fullReads = result.context.filter((c) => c.role !== 'symbolDetail' && c.readMode === 'full' && c.content);
+    assert.ok(fullReads.length > 0, 'deep mode should use full reads for at least some files');
+    assert.ok(result.metrics.detailMode === 'deep');
+  });
+
+  it('deduplication in minimal mode replaces primary with signatures-only when symbolDetail exists', async () => {
+    const result = await smartContext({
+      task: 'debug AuthMiddleware verifyToken',
+      detail: 'minimal',
+      include: ['symbolDetail'],
+    });
+    const symbolDetailItems = result.context.filter((c) => c.role === 'symbolDetail');
+    assert.ok(symbolDetailItems.length > 0, 'symbolDetail should be included for detected symbols');
+    const dedupedPrimary = result.context.find(
+      (c) => c.file === symbolDetailItems[0].file && c.role === 'primary' && c.readMode === 'signatures-only',
+    );
+    assert.ok(dedupedPrimary, 'primary item should be replaced with a signatures-only placeholder');
+    assert.equal(dedupedPrimary.content, '(omitted — see symbolDetail)');
+  });
+});
+
+describe('smart_context utility scoring', () => {
+  it('allocateReads prefers diverse evidence over redundant dependencies', () => {
+    const files = new Map([
+      ['src/auth/middleware.js', {
+        role: 'primary',
+        absPath: '/tmp/src/auth/middleware.js',
+        evidence: [{ type: 'searchHit', query: 'AuthMiddleware', rank: 1 }, { type: 'symbolMatch', symbols: ['AuthMiddleware'] }],
+        matchedSymbols: ['AuthMiddleware'],
+      }],
+      ['tests/auth.test.js', {
+        role: 'test',
+        absPath: '/tmp/tests/auth.test.js',
+        evidence: [{ type: 'testOf', via: 'src/auth/middleware.js' }],
+      }],
+      ['src/utils/jwt.js', {
+        role: 'dependency',
+        absPath: '/tmp/src/utils/jwt.js',
+        evidence: [{ type: 'dependencyOf', via: 'src/auth/middleware.js' }],
+      }],
+      ['src/utils/crypto.js', {
+        role: 'dependency',
+        absPath: '/tmp/src/utils/crypto.js',
+        evidence: [{ type: 'dependencyOf', via: 'src/auth/middleware.js' }],
+      }],
+    ]);
+
+    const plan = allocateReads(files, 2400, 'debug', 'balanced');
+    const selected = plan.map((item) => item.rel);
+
+    assert.equal(plan[0].rel, 'src/auth/middleware.js');
+    assert.ok(selected.includes('tests/auth.test.js'), 'test coverage should beat redundant dependency reads');
+    assert.equal(selected.filter((rel) => rel.startsWith('src/utils/')).length, 1, 'only one redundant dependency should be selected');
   });
 });

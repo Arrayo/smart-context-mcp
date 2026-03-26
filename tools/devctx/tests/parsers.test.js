@@ -16,6 +16,14 @@ import {
   extractGoSymbol,
   extractRustSymbol,
   extractJavaSymbol,
+  summarizeCsharp,
+  extractCsharpSymbol,
+  summarizeKotlin,
+  extractKotlinSymbol,
+  summarizePhp,
+  extractPhpSymbol,
+  summarizeSwift,
+  extractSwiftSymbol,
 } from '../src/tools/smart-read/additional-languages.js';
 
 const assertContains = (output, pattern, label) => {
@@ -618,5 +626,280 @@ public class SampleService {
     assertContains(result, /String email/, 'param1');
     assertContains(result, /String name/, 'param2');
     assertContains(result, /UUID\.randomUUID/, 'body');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C#
+// ---------------------------------------------------------------------------
+
+describe('summarizeCsharp', () => {
+  const source = `using System;
+using System.Collections.Generic;
+
+namespace Example.Services
+{
+    public interface IUserService
+    {
+        Guid CreateUser(string email);
+    }
+
+    public class SampleService : IUserService
+    {
+        public Guid CreateUser(string email)
+        {
+            return Guid.NewGuid();
+        }
+    }
+}
+`;
+
+  it('outline includes namespace, interface, class and method', () => {
+    const result = summarizeCsharp(source, 'outline');
+    assertContains(result, /Example\.Services/, 'namespace');
+    assertContains(result, /IUserService/, 'interface');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /CreateUser/, 'method');
+  });
+
+  it('signatures includes declarations and usings', () => {
+    const result = summarizeCsharp(source, 'signatures');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /System/, 'using');
+  });
+});
+
+describe('extractCsharpSymbol', () => {
+  const source = `public class SampleService {
+    public Guid CreateUser(string email) {
+        return Guid.NewGuid();
+    }
+
+    public void DeleteUser(Guid id) {
+        // noop
+    }
+}
+`;
+
+  it('extracts a class', () => {
+    const result = extractCsharpSymbol(source, 'SampleService');
+    assertContains(result, /class SampleService/, 'class');
+    assertContains(result, /CreateUser/, 'method');
+  });
+
+  it('extracts a method', () => {
+    const result = extractCsharpSymbol(source, 'CreateUser');
+    assertContains(result, /CreateUser/, 'method');
+    assertContains(result, /Guid\.NewGuid/, 'body');
+  });
+
+  it('returns not-found for missing symbol', () => {
+    assertContains(extractCsharpSymbol(source, 'nope'), /Symbol not found/, 'not found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Kotlin
+// ---------------------------------------------------------------------------
+
+describe('summarizeKotlin', () => {
+  const source = `package com.example
+
+import java.util.UUID
+
+data class UserDto(val id: UUID, val email: String)
+
+class SampleService {
+    fun createUser(email: String): UUID {
+        return UUID.randomUUID()
+    }
+}
+
+fun topLevelHelper(): String {
+    return "helper"
+}
+`;
+
+  it('outline includes package, class, data class and functions', () => {
+    const result = summarizeKotlin(source, 'outline');
+    assertContains(result, /com\.example/, 'package');
+    assertContains(result, /UserDto/, 'data class');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /topLevelHelper/, 'top-level fun');
+  });
+
+  it('signatures includes declarations and imports', () => {
+    const result = summarizeKotlin(source, 'signatures');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /java\.util\.UUID/, 'import');
+  });
+});
+
+describe('extractKotlinSymbol', () => {
+  const source = `class SampleService {
+    fun createUser(email: String): UUID {
+        return UUID.randomUUID()
+    }
+
+    fun deleteUser(id: UUID) {
+        // noop
+    }
+}
+`;
+
+  it('extracts a class', () => {
+    const result = extractKotlinSymbol(source, 'SampleService');
+    assertContains(result, /class SampleService/, 'class');
+    assertContains(result, /createUser/, 'method');
+  });
+
+  it('extracts a function', () => {
+    const result = extractKotlinSymbol(source, 'createUser');
+    assertContains(result, /createUser/, 'fun');
+    assertContains(result, /UUID\.randomUUID/, 'body');
+  });
+
+  it('returns not-found for missing symbol', () => {
+    assertContains(extractKotlinSymbol(source, 'nope'), /Symbol not found/, 'not found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PHP
+// ---------------------------------------------------------------------------
+
+describe('summarizePhp', () => {
+  const source = `<?php
+
+namespace App\\Services;
+
+use App\\Models\\User;
+
+interface UserServiceContract
+{
+    public function createUser($email);
+}
+
+class SampleService implements UserServiceContract
+{
+    public function createUser($email)
+    {
+        return new User($email);
+    }
+}
+`;
+
+  it('outline includes namespace, interface, class and method', () => {
+    const result = summarizePhp(source, 'outline');
+    assertContains(result, /App\\Services/, 'namespace');
+    assertContains(result, /UserServiceContract/, 'interface');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /createUser/, 'method');
+  });
+
+  it('signatures includes declarations and uses', () => {
+    const result = summarizePhp(source, 'signatures');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /App\\Models\\User/, 'use');
+  });
+});
+
+describe('extractPhpSymbol', () => {
+  const source = `<?php
+class SampleService
+{
+    public function createUser($email)
+    {
+        return new User($email);
+    }
+
+    public function deleteUser($id)
+    {
+        // noop
+    }
+}
+`;
+
+  it('extracts a class', () => {
+    const result = extractPhpSymbol(source, 'SampleService');
+    assertContains(result, /class SampleService/, 'class');
+    assertContains(result, /createUser/, 'method');
+  });
+
+  it('extracts a method', () => {
+    const result = extractPhpSymbol(source, 'createUser');
+    assertContains(result, /createUser/, 'function');
+    assertContains(result, /new User/, 'body');
+  });
+
+  it('returns not-found for missing symbol', () => {
+    assertContains(extractPhpSymbol(source, 'nope'), /Symbol not found/, 'not found');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Swift
+// ---------------------------------------------------------------------------
+
+describe('summarizeSwift', () => {
+  const source = `import Foundation
+
+protocol UserServiceProtocol {
+    func createUser(email: String) -> UUID
+}
+
+struct UserDto {
+    let id: UUID
+    let email: String
+}
+
+class SampleService: UserServiceProtocol {
+    func createUser(email: String) -> UUID {
+        return UUID()
+    }
+}
+`;
+
+  it('outline includes protocol, struct, class and func', () => {
+    const result = summarizeSwift(source, 'outline');
+    assertContains(result, /UserServiceProtocol/, 'protocol');
+    assertContains(result, /UserDto/, 'struct');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /createUser/, 'func');
+  });
+
+  it('signatures includes declarations and imports', () => {
+    const result = summarizeSwift(source, 'signatures');
+    assertContains(result, /SampleService/, 'class');
+    assertContains(result, /Foundation/, 'import');
+  });
+});
+
+describe('extractSwiftSymbol', () => {
+  const source = `class SampleService {
+    func createUser(email: String) -> UUID {
+        return UUID()
+    }
+
+    func deleteUser(id: UUID) {
+        // noop
+    }
+}
+`;
+
+  it('extracts a class', () => {
+    const result = extractSwiftSymbol(source, 'SampleService');
+    assertContains(result, /class SampleService/, 'class');
+    assertContains(result, /createUser/, 'method');
+  });
+
+  it('extracts a function', () => {
+    const result = extractSwiftSymbol(source, 'createUser');
+    assertContains(result, /createUser/, 'func');
+    assertContains(result, /UUID\(\)/, 'body');
+  });
+
+  it('returns not-found for missing symbol', () => {
+    assertContains(extractSwiftSymbol(source, 'nope'), /Symbol not found/, 'not found');
   });
 });

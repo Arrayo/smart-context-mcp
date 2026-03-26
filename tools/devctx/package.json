@@ -1,6 +1,6 @@
 {
   "name": "devctx-mcp",
-  "version": "0.6.0",
+  "version": "0.8.0",
   "description": "Local MCP server that gives AI agents compact file summaries, ranked code search, and safe diagnostic shell access.",
   "author": "Francisco Caballero Portero <fcp1978@hotmail.com>",
   "type": "module",
@@ -14,7 +14,8 @@
   },
   "bin": {
     "devctx-server": "scripts/devctx-server.js",
-    "devctx-init": "scripts/init-clients.js"
+    "devctx-init": "scripts/init-clients.js",
+    "devctx-report": "scripts/report-metrics.js"
   },
   "exports": {
     ".": "./src/server.js",
@@ -23,7 +24,8 @@
   "files": [
     "src/",
     "scripts/devctx-server.js",
-    "scripts/init-clients.js"
+    "scripts/init-clients.js",
+    "scripts/report-metrics.js"
   ],
   "engines": {
     "node": ">=18"
@@ -45,7 +47,11 @@
     "smoke:formats": "node ./scripts/format-smoke.js",
     "test": "node --test ./tests/*.test.js",
     "eval": "node ./evals/harness.js",
-    "eval:report": "node ./evals/report.js"
+    "eval:context": "node ./evals/harness.js --tool=context",
+    "eval:both": "node ./evals/harness.js --tool=both",
+    "eval:self": "node ./evals/harness.js --root=../.. --corpus=./evals/corpus/self-tasks.json",
+    "eval:report": "node ./evals/report.js",
+    "report:metrics": "node ./scripts/report-metrics.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.0",

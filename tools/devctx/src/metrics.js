@@ -1,12 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { countTokens } from './tokenCounter.js';
-import { devctxRoot } from './utils/paths.js';
+import { devctxRoot, projectRoot } from './utils/paths.js';
 
-const defaultMetricsDir = path.join(devctxRoot, '.devctx');
-const defaultMetricsFile = path.join(defaultMetricsDir, 'metrics.jsonl');
+const defaultMetricsDir = () => path.join(projectRoot, '.devctx');
+const defaultMetricsFile = () => path.join(defaultMetricsDir(), 'metrics.jsonl');
+const legacyMetricsFile = path.join(devctxRoot, '.devctx', 'metrics.jsonl');
 
-const resolveMetricsFile = () => process.env.DEVCTX_METRICS_FILE ?? defaultMetricsFile;
+export const getMetricsFilePath = () => process.env.DEVCTX_METRICS_FILE ?? defaultMetricsFile();
+export const getLegacyMetricsFilePath = () => legacyMetricsFile;
 
 let lastEnsuredDir = null;
 
@@ -53,7 +55,7 @@ const rotateIfNeeded = async (filePath) => {
 
 export const persistMetrics = async (entry) => {
   try {
-    const filePath = resolveMetricsFile();
+    const filePath = getMetricsFilePath();
     await ensureMetricsDir(filePath);
     await fs.appendFile(filePath, `${JSON.stringify(entry)}\n`, 'utf8');
     await rotateIfNeeded(filePath);

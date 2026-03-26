@@ -289,6 +289,27 @@ const updateClaudeMd = (targetDir, dryRun) => {
   writeFile(filePath, upsertMarkdownSection(current), dryRun);
 };
 
+const hasGitignoreEntry = (content, entry) => {
+  const target = entry.replace(/\/+$/, '');
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/\/+$/, ''))
+    .includes(target);
+};
+
+const ensureGitignoreEntry = (targetDir, dryRun) => {
+  const filePath = path.join(targetDir, '.gitignore');
+  const current = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+
+  if (hasGitignoreEntry(current, '.devctx/')) return;
+
+  const trimmed = current.trimEnd();
+  const next = trimmed.length === 0 ? '.devctx/\n' : `${trimmed}\n\n.devctx/\n`;
+  writeFile(filePath, next, dryRun);
+};
+
 const main = () => {
   const options = parseArgs(process.argv.slice(2));
   const targetDir = path.resolve(options.target);
@@ -301,6 +322,7 @@ const main = () => {
   });
 
   const clientSet = new Set(options.clients);
+  ensureGitignoreEntry(targetDir, options.dryRun);
 
   if (clientSet.has('cursor')) {
     updateCursorConfig(targetDir, serverConfig, options.dryRun);

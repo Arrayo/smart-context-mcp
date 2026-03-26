@@ -1,0 +1,200 @@
+[
+  {
+    "id": "self-def-01",
+    "taskType": "find-definition",
+    "description": "where is smartRead implemented?",
+    "query": "smartRead",
+    "expectedFiles": [
+      "tools/devctx/src/tools/smart-read.js"
+    ],
+    "expectedSymbols": [
+      "smartRead"
+    ]
+  },
+  {
+    "id": "self-def-02",
+    "taskType": "find-definition",
+    "description": "which file owns buildIndex?",
+    "query": "buildIndex",
+    "expectedFiles": [
+      "tools/devctx/src/index.js"
+    ],
+    "expectedSymbols": [
+      "buildIndex"
+    ]
+  },
+  {
+    "id": "self-def-03",
+    "taskType": "find-definition",
+    "description": "where is smartSearch implemented?",
+    "query": "smartSearch",
+    "expectedFiles": [
+      "tools/devctx/src/tools/smart-search.js"
+    ],
+    "expectedSymbols": [
+      "smartSearch"
+    ]
+  },
+  {
+    "id": "self-def-04",
+    "taskType": "find-definition",
+    "description": "where is smartContext implemented?",
+    "query": "smartContext",
+    "expectedFiles": [
+      "tools/devctx/src/tools/smart-context.js"
+    ],
+    "expectedSymbols": [
+      "smartContext"
+    ]
+  },
+  {
+    "id": "self-def-05",
+    "taskType": "find-definition",
+    "description": "where are token counts computed?",
+    "query": "countTokens",
+    "expectedFiles": [
+      "tools/devctx/src/tokenCounter.js"
+    ],
+    "expectedSymbols": [
+      "countTokens"
+    ]
+  },
+  {
+    "id": "self-def-06",
+    "taskType": "find-definition",
+    "description": "which file creates the devctx server?",
+    "query": "createDevctxServer",
+    "expectedFiles": [
+      "tools/devctx/src/server.js"
+    ],
+    "expectedSymbols": [
+      "createDevctxServer"
+    ]
+  },
+  {
+    "id": "self-debug-01",
+    "taskType": "debug",
+    "description": "where does smart_search fall back when ripgrep fails?",
+    "query": "fallbackReason",
+    "expectedFiles": [
+      "tools/devctx/src/tools/smart-search.js"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-debug-02",
+    "taskType": "debug",
+    "description": "where do we check cache invalidation via mtime?",
+    "query": "mtime",
+    "expectedFiles": [
+      "tools/devctx/src/tools/smart-read.js"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-debug-03",
+    "taskType": "debug",
+    "description": "where are blocked shell commands handled?",
+    "query": "blocked",
+    "expectedFiles": [
+      "tools/devctx/src/tools/smart-shell.js"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-review-01",
+    "taskType": "review",
+    "description": "review the smart_context implementation",
+    "query": "smartContext",
+    "expectedFiles": [
+      "tools/devctx/src/tools/smart-context.js"
+    ],
+    "expectedSymbols": [
+      "smartContext"
+    ]
+  },
+  {
+    "id": "self-review-02",
+    "taskType": "review",
+    "description": "review the metrics pipeline",
+    "query": "buildMetrics",
+    "expectedFiles": [
+      "tools/devctx/src/metrics.js"
+    ],
+    "expectedSymbols": [
+      "buildMetrics"
+    ]
+  },
+  {
+    "id": "self-tests-01",
+    "taskType": "tests",
+    "description": "which existing test covers the symbol index?",
+    "query": "buildIndex",
+    "expectedFiles": [
+      "tools/devctx/tests/robustness.test.js"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-tests-02",
+    "taskType": "tests",
+    "description": "where are parser suites exercised?",
+    "query": "summarizeCode",
+    "expectedFiles": [
+      "tools/devctx/tests/parsers.test.js"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-config-01",
+    "taskType": "config",
+    "description": "where is the package configuration for devctx?",
+    "query": "devctx-mcp",
+    "expectedFiles": [
+      "tools/devctx/package.json"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-config-02",
+    "taskType": "config",
+    "description": "where are tool schemas defined?",
+    "query": "server.tool",
+    "expectedFiles": [
+      "tools/devctx/src/server.js"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-explore-01",
+    "taskType": "explore",
+    "description": "what is the main server entry point for this project?",
+    "query": "devctx-server",
+    "expectedFiles": [
+      "tools/devctx/scripts/devctx-server.js"
+    ],
+    "expectedSymbols": []
+  },
+  {
+    "id": "self-explore-02",
+    "taskType": "explore",
+    "description": "where is graph coverage computed?",
+    "query": "getGraphCoverage",
+    "expectedFiles": [
+      "tools/devctx/src/index.js"
+    ],
+    "expectedSymbols": [
+      "getGraphCoverage"
+    ]
+  },
+  {
+    "id": "self-refactor-01",
+    "taskType": "refactor",
+    "description": "where does the symbol extraction pipeline start?",
+    "query": "extractFileInfo",
+    "expectedFiles": [
+      "tools/devctx/src/index.js"
+    ],
+    "expectedSymbols": []
+  }
+]

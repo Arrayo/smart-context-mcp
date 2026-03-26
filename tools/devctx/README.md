@@ -22,10 +22,11 @@ This installs the MCP server and generates client configs for Cursor, Codex, Qwe
 
 ## Binaries
 
-The package exposes two binaries:
+The package exposes three binaries:
 
 - `devctx-server`
 - `devctx-init`
+- `devctx-report`
 
 Start the MCP server against the current project:
 
@@ -58,6 +59,49 @@ Override the command used in generated configs:
 ```bash
 devctx-init --target /path/to/project --command node --args '["./tools/devctx/src/mcp-server.js"]'
 ```
+
+## Metrics
+
+Each tool call persists token metrics to the target repo by default in:
+
+```bash
+.devctx/metrics.jsonl
+```
+
+This makes per-repo usage visible without digging into `node_modules`. Running `devctx-init` also adds `.devctx/` to the target repo's `.gitignore` idempotently.
+
+Show a quick report:
+
+```bash
+devctx-report
+```
+
+Show JSON output or a custom file:
+
+```bash
+devctx-report --json
+devctx-report --file ./.devctx/metrics.jsonl
+```
+
+Example output:
+
+```text
+devctx metrics report
+
+File:         /path/to/repo/.devctx/metrics.jsonl
+Source:       default
+Entries:      148
+Raw tokens:   182,340
+Final tokens: 41,920
+Saved tokens: 140,420 (77.01%)
+
+By tool:
+  smart_context  count=42 raw=96,200 final=24,180 saved=72,020 (74.86%)
+  smart_read     count=71 raw=52,810 final=9,940 saved=42,870 (81.18%)
+  smart_search   count=35 raw=33,330 final=7,800 saved=25,530 (76.59%)
+```
+
+If you want to override the location entirely, set `DEVCTX_METRICS_FILE`.
 
 ## Usage per client
 
@@ -124,16 +168,20 @@ Good fit:
 - Go services
 - Rust services and libraries
 - Java backends with straightforward structure
+- C# / .NET projects
+- Kotlin backends and Android projects
+- PHP applications (Laravel, Symfony, etc.)
+- Swift projects and iOS codebases
 
 Partial fit:
 
-- Large enterprise Java codebases with heavy framework magic
+- Large enterprise Java/C# codebases with heavy framework magic
 - Repos with a lot of generated code
 - Polyglot monorepos where semantic ranking matters more than text structure
 
 Not a strong fit yet:
 
-- PHP, Ruby, C#, Kotlin, Swift, Elixir
+- Ruby, Elixir, Scala
 - Codebases that need deep semantic understanding everywhere
 - Use cases where `smart_shell` must behave like a general shell
 
@@ -151,6 +199,16 @@ Modes:
 
 The `symbol` mode supports nested methods (class methods, object methods), interface signatures, and multiline function signatures across all supported languages.
 
+Cross-file symbol context:
+
+- Pass `context: true` with `symbol` mode to include callers, tests, and referenced types from the dependency graph
+- Callers: files that import the current file and reference the symbol (via graph + ripgrep)
+- Tests: test files related to the current file that mention the symbol
+- Types: type/interface names referenced in the symbol definition that exist in the index
+- Requires `build_index` for graph data; without it, the definition is returned with an empty context and a hint
+- Response includes `context: { callers, tests, types }` with counts, `graphCoverage: { imports, tests }` (`full|partial|none`), and `contextHints` if applicable
+- `graphCoverage` indicates how reliable cross-file context is: `full` for JS/TS/Python/Go (imports resolved), `partial` for C#/Kotlin/PHP/Swift (imports extracted but namespace-based), `none` for other languages
+
 Token budget mode:
 
 - Pass `maxTokens` to let the tool auto-select the most detailed mode that fits the budget
@@ -161,10 +219,19 @@ Token budget mode:
 
 Responses are cached in memory per session. If the same file+mode is requested again and the file's `mtime` has not changed, the cached result is returned without re-parsing. The response includes `cached: true` when served from cache.
 
-Every response includes confidence metadata:
+Every response includes a unified `confidence` block:
 
-- `parser` — `"ast"` (JS/TS via TypeScript compiler), `"heuristic"` (line-based patterns), `"fallback"` (structural text extraction), or `"raw"` (full and range modes only). Symbol mode reflects the actual extraction strategy (ast/heuristic/fallback).
+```json
+{ "parser": "ast", "truncated": false, "cached": false }
+```
+
+- `parser` — `"ast"` (JS/TS via TypeScript compiler), `"heuristic"` (line-based patterns), `"fallback"` (structural text extraction), or `"raw"` (full and range modes only).
 - `truncated` — `true` when output was capped, so the agent knows to request a more targeted mode
+- `cached` — `true` when served from in-memory cache without re-parsing
+- `graphCoverage` — (symbol mode with `context: true` only) `{ imports, tests }` each `"full"|"partial"|"none"`
+
+Additional flat metadata fields (backward-compatible):
+
 - `indexHint` — (symbol mode only) `true` when the symbol index guided the extraction
 - `chosenMode` — (token budget only) the mode that was actually used after cascade
 - `budgetApplied` — (token budget only) `true` when the mode was downgraded to fit the budget
@@ -172,7 +239,7 @@ Every response includes confidence metadata:
 Current support:
 
 - First-class (AST): JS, JSX, TS, TSX
-- Heuristic: Python, Go, Rust, Java, shell, Terraform, HCL, Dockerfile, SQL, JSON, TOML, YAML
+- Heuristic: Python, Go, Rust, Java, C#, Kotlin, PHP, Swift, shell, Terraform, HCL, Dockerfile, SQL, JSON, TOML, YAML
 - Fallback: plain-text structural extraction for unsupported formats
 
 ### `smart_read_batch`
@@ -208,8 +275,9 @@ Response:
 - Optional `intent` parameter adjusts ranking: `implementation`, `debug`, `tests`, `config`, `docs`, `explore`
 - When a symbol index exists (via `build_index`), files with matching definitions get +50 ranking bonus, and related files (importers, tests, neighbors) get +25 graph boost
 - Index is loaded from `projectRoot`, so subdirectory searches still benefit from the project-level index
-- Returns `retrievalConfidence`: `"high"` (rg), `"medium"` (walk, no skips), `"low"` (walk with skipped files)
-- Returns `indexFreshness`: `"fresh"`, `"stale"` (files modified since last build), or `"unavailable"`
+- Returns a unified `confidence` block: `{ "level": "high", "indexFreshness": "fresh" }`
+- `retrievalConfidence`: `"high"` (rg), `"medium"` (walk, no skips), `"low"` (walk with skipped files)
+- `indexFreshness`: `"fresh"`, `"stale"` (files modified since last build), or `"unavailable"`
 - Returns `sourceBreakdown`: how many top-10 results came from text match, index boost, or graph boost
 - When fallback is used, includes `provenance` with `fallbackReason`, `caseMode`, `partial`, skip counts, and `warnings`
 
@@ -220,6 +288,7 @@ Example response:
   "engine": "rg",
   "retrievalConfidence": "high",
   "indexFreshness": "fresh",
+  "confidence": { "level": "high", "indexFreshness": "fresh" },
   "sourceBreakdown": { "textMatch": 7, "indexBoost": 2, "graphBoost": 1 },
   "intent": "tests",
   "indexBoosted": 2
@@ -237,15 +306,27 @@ Parameters:
 - `maxTokens` (optional, default 8000) — token budget for the response; fewer files are included with tighter budgets
 - `entryFile` (optional) — hint file to guarantee inclusion as primary context
 - `diff` (optional) — scope context to changed files only. Pass `true` for uncommitted changes vs HEAD, or a git ref string (`"main"`, `"HEAD~1"`, `"origin/main"`) to diff against that ref. Requires a git repository.
+- `detail` (optional, default `balanced`) — control response detail level:
+  - `minimal`: index-first mode, returns file paths, roles, `reasonIncluded`, `evidence`, symbols, signatures, and `symbolPreviews` from the index without reading file content (fastest, lowest tokens)
+  - `balanced`: default mode, reads file content with smart compression (outline/signatures modes)
+  - `deep`: full content mode (highest tokens, most detail)
+- `include` (optional, default `["content","graph","hints","symbolDetail"]`) — array of fields to include in the response. Omit fields to reduce payload size:
+  - `content`: file content blocks (if omitted, only metadata and signatures are returned)
+  - `graph`: relational graph summary (imports, tests, dependents, neighbors)
+  - `hints`: actionable suggestions for follow-up reads or index rebuilds
+  - `symbolDetail`: focused symbol extraction for identifiers detected in the task
 
 Pipeline:
 
 1. **Search mode** (default): Extracts search queries and symbol candidates from the task, runs `smart_search` with the best query and intent
 2. **Diff mode** (when `diff` is provided): Runs `git diff --name-only <ref>` to get changed files, skips search entirely
 3. Expands top results via the relational graph (`queryRelated`): imports, importedBy, tests, neighbors
-4. Allocates read modes per file role: `outline` for primary files, `signatures` for tests/dependencies
-5. Extracts symbol details when identifiers (camelCase/PascalCase/snake_case) are detected in the task
-6. Assembles everything into a single response with graph summary and actionable hints
+4. **Index-first mode** (when `detail=minimal` or `include` omits `content`): Returns file metadata, evidence, symbols, signatures, and short symbol previews from the index without opening files
+5. **Batch read mode** (when `detail=balanced|deep` and `include` has `content`): Uses `smart_read_batch` internally to read multiple files in one batched call, reducing round-trips
+6. Allocates read modes per file role: `outline` for primary files in `balanced`, `signatures` for tests/dependencies, and `full` reads in `deep`
+7. Extracts symbol details when identifiers (camelCase/PascalCase/snake_case) are detected in the task (if `include` has `symbolDetail`)
+8. **Deduplication** (when `detail=minimal`): If `symbolDetail` is included, omits redundant outline content from the same file to save tokens
+9. Assembles everything into a single response with graph summary, actionable hints, and per-file inclusion evidence
 
 Diff mode is ideal for PR review and debugging recent changes — instead of searching the full codebase, it reads only the changed files plus their tests and dependencies.
 
@@ -256,11 +337,12 @@ Example response:
   "task": "debug AuthMiddleware",
   "intent": "debug",
   "indexFreshness": "fresh",
+  "confidence": { "indexFreshness": "fresh", "graphCoverage": { "imports": "full", "tests": "full" } },
   "context": [
-    { "file": "src/auth/middleware.js", "role": "primary", "readMode": "outline", "symbols": ["AuthMiddleware", "requireRole"], "content": "..." },
-    { "file": "tests/auth.test.js", "role": "test", "readMode": "signatures", "content": "..." },
-    { "file": "src/utils/jwt.js", "role": "dependency", "readMode": "signatures", "content": "..." },
-    { "file": "src/auth/middleware.js", "role": "symbolDetail", "readMode": "symbol", "content": "..." }
+    { "file": "src/auth/middleware.js", "role": "primary", "readMode": "outline", "reasonIncluded": "Matched task search: AuthMiddleware", "evidence": [{ "type": "searchHit", "query": "AuthMiddleware", "rank": 1 }, { "type": "symbolMatch", "symbols": ["AuthMiddleware"] }], "symbols": ["AuthMiddleware", "requireRole"], "symbolPreviews": [{ "name": "AuthMiddleware", "kind": "class", "signature": "export class AuthMiddleware", "snippet": "export class AuthMiddleware { ..." }], "content": "..." },
+    { "file": "tests/auth.test.js", "role": "test", "readMode": "signatures", "reasonIncluded": "Test for src/auth/middleware.js", "evidence": [{ "type": "testOf", "via": "src/auth/middleware.js" }], "content": "..." },
+    { "file": "src/utils/jwt.js", "role": "dependency", "readMode": "signatures", "reasonIncluded": "Imported by src/auth/middleware.js", "evidence": [{ "type": "dependencyOf", "via": "src/auth/middleware.js" }], "content": "..." },
+    { "file": "src/auth/middleware.js", "role": "symbolDetail", "readMode": "symbol", "reasonIncluded": "Focused symbol detail: AuthMiddleware", "evidence": [{ "type": "symbolDetail", "symbols": ["AuthMiddleware"] }], "content": "..." }
   ],
   "graph": {
     "primaryImports": ["src/utils/jwt.js"],
@@ -268,12 +350,15 @@ Example response:
     "dependents": [],
     "neighbors": ["src/utils/logger.js"]
   },
+  "graphCoverage": { "imports": "full", "tests": "full" },
   "metrics": { "totalTokens": 1200, "filesIncluded": 4, "filesEvaluated": 8, "savingsPct": 82 },
   "hints": ["Inspect symbols with smart_read: verifyJwt, createJwt"]
 }
 ```
 
-File roles: `primary` (search hits or changed files), `test` (related test files), `dependency` (imports), `dependent` (importedBy), `symbolDetail` (extracted symbol bodies).
+`graphCoverage` indicates how complete the relational context is: `full` for JS/TS/Python/Go (imports resolved to local files), `partial` for C#/Kotlin/PHP/Swift (imports extracted but namespace-based), `none` for other languages. When files from multiple languages are included, the level reflects the weakest coverage.
+
+File roles: `primary` (search hits or changed files), `test` (related test files), `dependency` (imports), `dependent` (importedBy), `symbolDetail` (extracted symbol bodies). Each item also includes `reasonIncluded` and structured `evidence` so the agent knows why it was selected.
 
 When using diff mode, the response includes a `diffSummary`:
 
@@ -286,10 +371,11 @@ When using diff mode, the response includes a `diffSummary`:
 ### `build_index`
 
 - Builds a lightweight symbol index for the project (functions, classes, methods, types, etc.)
-- Supports JS/TS (via TypeScript AST), Python, Go, Rust, Java
+- Supports JS/TS (via TypeScript AST), Python, Go, Rust, Java, C#, Kotlin, PHP, Swift
 - Extracts imports/exports and builds a dependency graph with `import` and `testOf` edges
 - Test files are linked to source files via import analysis and naming conventions
 - Index stored per-project in `.devctx/index.json`, invalidated by file mtime
+- Each symbol includes a condensed `signature` (one line, max 200 chars) and a short `snippet` preview so agents can inspect likely definitions without opening files
 - Accelerates `smart_search` (symbol + graph ranking) and `smart_read` symbol mode (line hints)
 - Pass `incremental=true` to only reindex files with changed mtime — much faster for large repos (10k+ files). Falls back to full rebuild if no prior index exists.
 - Incremental response includes `reindexed`, `removed`, `unchanged` counts
@@ -301,20 +387,24 @@ When using diff mode, the response includes a `diffSummary`:
 - Executes from the effective project root
 - Blocks shell operators and unsafe commands by design
 
-## Evaluations
+## Evaluations (repo development only)
 
-The project includes an eval harness with a synthetic corpus of 26 tasks (find-definition, debug, review, tests, refactor, config, onboard, explore). Current results:
-
-- **P@5**: 0.962 | **Pass rate**: 25/26 (96%) | **Wrong-file rate**: 0.115
-- **Latency p50/p95**: 9/11ms | **Retrieval honesty**: 0.962
+The eval harness and corpora are available in the [source repository](https://github.com/Arrayo/devctx-mcp-mvp) but are **not included in the npm package**. Clone the repo to run evaluations.
 
 ```bash
-npm run eval                # full run with index + intent
+# from the repo root:
+cd tools/devctx
+npm run eval                # synthetic corpus with index + intent
 npm run eval -- --baseline  # baseline without index/intent
+npm run eval:self           # self-eval against the real devctx repo
+npm run eval:context        # evaluate smart_context alongside search
+npm run eval:both           # search + context evaluation
 npm run eval:report         # scorecard with delta vs baseline
 ```
 
-The harness supports `--root=` and `--corpus=` for evaluating against real repos with custom task corpora.
+The harness supports `--root=` and `--corpus=` for evaluating against any repo with custom task corpora. Use `--tool=search|context|both` to control which tools are evaluated. When `--tool=context`, pass/fail is determined by `smart_context` precision; when `--tool=both`, both search and context must pass.
+
+Metrics include: P@5, P@10, Recall, wrong-file rate, retrieval honesty, follow-up reads, tokens-to-success, latency p50/p95, confidence calibration (accuracy, over-confident rate, under-confident rate), and smart_context metrics when applicable. smart_context reporting now includes precision, explanation coverage (`reasonIncluded` + `evidence`), preview coverage (`symbolPreviews`), and preview symbol recall. Token metrics (`totalTokens`) reflect the full JSON payload, not just content blocks.
 
 ## Notes
 

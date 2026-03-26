@@ -28,17 +28,21 @@ The project is already useful across real repos. It is strongest in modern web/b
 - Go services
 - Rust services and libraries
 - Java backends with straightforward structure
+- C# / .NET projects
+- Kotlin backends and Android projects
+- PHP applications (Laravel, Symfony, etc.)
+- Swift projects and iOS codebases
 - Repos with a lot of config and operational code
 
 ### Partial fit
 
-- Large enterprise Java codebases with heavy framework magic
+- Large enterprise Java/C# codebases with heavy framework magic
 - Repos with a lot of generated code
 - Polyglot monorepos where semantic ranking matters more than text structure
 
 ### Not a strong fit yet
 
-- PHP, Ruby, C#, Kotlin, Swift, Elixir
+- Ruby, Elixir, Scala
 - Codebases that require deep language-aware semantic understanding everywhere
 - Cases where `smart_shell` needs to behave like a general shell
 
@@ -231,23 +235,30 @@ Modes:
 - `outline`: imports, exports, declarations, structure (~90% token savings)
 - `signatures`: function/class signatures (~90% token savings)
 - `range`: read specific lines by number — pass `startLine` and `endLine`
-- `symbol`: extract a function/class/method by name — pass `symbol` parameter (string or array of strings for batch extraction). Uses language-aware parsing (AST for JS/TS including class methods, indent-tracking for Python, brace-counting for Go/Rust/Java). Handles multiline signatures.
+- `symbol`: extract a function/class/method by name — pass `symbol` parameter (string or array of strings for batch extraction). Uses language-aware parsing (AST for JS/TS including class methods, indent-tracking for Python, brace-counting for Go/Rust/Java/C#/Kotlin/PHP/Swift). Handles multiline signatures. Pass `context: true` to include callers, tests, and referenced types from the dependency graph in a single call. Response includes `graphCoverage: { imports, tests }` (`full|partial|none`) so the agent knows how reliable the cross-file context is.
 - `full`: file content capped at 12k chars, with truncation marker when needed
 - `maxTokens`: token budget — the tool auto-selects the most detailed mode that fits (`full` -> `outline` -> `signatures` -> truncated). Response includes `chosenMode` and `budgetApplied` when the mode was downgraded.
 
 Responses are cached in memory per session and invalidated by file `mtime`. `cached: true` appears when the response is served from cache without re-parsing.
 
-Every response includes confidence metadata:
+Every response includes a unified `confidence` block:
 
-- `parser` — `"ast"` (JS/TS via TypeScript compiler), `"heuristic"` (line-based patterns), `"fallback"` (structural text extraction), or `"raw"` (full and range modes only). Symbol mode reflects the actual extraction strategy (ast/heuristic/fallback).
+```json
+{ "parser": "ast", "truncated": false, "cached": false }
+```
+
+- `parser` — `"ast"` (JS/TS via TypeScript compiler), `"heuristic"` (line-based patterns), `"fallback"` (structural text extraction), or `"raw"` (full and range modes only).
 - `truncated` — `true` when output was capped, so the agent knows to request a more targeted mode
-- `indexHint` — (symbol mode only) `true` when the symbol index guided the extraction
+- `cached` — `true` when served from in-memory cache without re-parsing
+- `graphCoverage` — (symbol mode with `context: true` only) `{ imports, tests }` each `"full"|"partial"|"none"`
+
+Additional flat fields: `indexHint` (symbol mode), `chosenMode`/`budgetApplied` (token budget).
 
 Current language / format support:
 
 - First-class (AST): JS, JSX, TS, TSX
-- Heuristic: Python, Go, Rust, Java, shell, Terraform, HCL, Dockerfile, SQL, JSON, TOML, YAML
-- Symbol extraction: JS, TS, Python, Go, Rust, Java (+ generic fallback)
+- Heuristic: Python, Go, Rust, Java, C#, Kotlin, PHP, Swift, shell, Terraform, HCL, Dockerfile, SQL, JSON, TOML, YAML
+- Symbol extraction: JS, TS, Python, Go, Rust, Java, C#, Kotlin, PHP, Swift (+ generic fallback)
 - Fallback: plain-text structural extraction for unsupported formats
 
 ### `smart_read_batch`
@@ -263,8 +274,9 @@ Current language / format support:
 - Groups matches by file, ranks results to reduce noise
 - Optional `intent` parameter: `implementation`, `debug`, `tests`, `config`, `docs`, `explore`
 - When a symbol index exists (via `build_index`), files containing matching definitions get a ranking bonus (+50), and related files (importers, tests, neighbors) get a graph boost (+25)
-- Returns `retrievalConfidence`: `"high"` (rg), `"medium"` (walk, no skips), `"low"` (walk with skipped files)
-- Returns `indexFreshness`: `"fresh"`, `"stale"` (files modified since last `build_index`), or `"unavailable"`
+- Returns a unified `confidence` block: `{ "level": "high", "indexFreshness": "fresh" }`
+- `retrievalConfidence`: `"high"` (rg), `"medium"` (walk, no skips), `"low"` (walk with skipped files)
+- `indexFreshness`: `"fresh"`, `"stale"` (files modified since last `build_index`), or `"unavailable"`
 - Returns `sourceBreakdown`: `{ textMatch, indexBoost, graphBoost }` — how many top-10 results came from each source
 - When fallback is used, includes `provenance` with `fallbackReason`, `caseMode`, `partial`, skip counts, and `warnings`
 - Index is loaded from `projectRoot`, not from `cwd`, so subdirectory searches still benefit from the project-level index
@@ -275,20 +287,25 @@ One-call context planner that replaces the manual `smart_search` → `smart_read
 
 - Receives a natural language `task` description (e.g., `"debug the auth flow in AuthMiddleware"`)
 - Auto-detects `intent` from keywords, or accepts explicit override
+- **Index-first mode** (`detail=minimal`): returns file paths, roles, `reasonIncluded`, `evidence`, symbols, signatures, and short symbol previews from the index without reading file content — fastest, lowest tokens
+- **Batch read mode** (default `detail=balanced`): uses `smart_read_batch` internally to read multiple files in one batched call, reducing round-trips
 - Runs `smart_search` internally, then expands results via the relational graph
-- Reads each relevant file with the optimal mode (`outline` for primary files, `signatures` for tests/dependencies)
-- Extracts symbol details when identifiers are detected in the task
-- Returns curated context, graph summary, metrics, and actionable `hints`
-- Accepts `maxTokens` budget (default 8000) to control response size and `entryFile` to guarantee a specific file in context
+- Reads each relevant file with the optimal mode (`outline` for primary files in `balanced`, `signatures` for tests/dependencies, and `full` reads in `deep`)
+- Extracts symbol details when identifiers are detected in the task (if `include` has `symbolDetail`)
+- **Deduplication** (in `minimal` mode): omits redundant outline content when `symbolDetail` covers the same file
+- Returns curated context, graph summary, `graphCoverage`, metrics, actionable `hints`, plus `reasonIncluded` / `evidence` metadata for every context item
+- Includes a unified `confidence` block: `{ indexFreshness, graphCoverage }` — same contract as other tools
+- Accepts `maxTokens` budget (default 8000), `entryFile` to guarantee a specific file, `detail` mode (`minimal|balanced|deep`), and `include` array (`["content","graph","hints","symbolDetail"]`) for granular control
 - **Diff mode**: pass `diff=true` (vs HEAD) or `diff="main"` to scope context to changed files only — ideal for PR review and debugging recent changes
 - Saves multiple round-trips and exploration tokens in a single MCP call
 
 ### `build_index`
 
 - Builds a lightweight symbol index (functions, classes, methods, types, etc.)
-- Supports JS/TS (via TypeScript AST), Python, Go, Rust, Java
+- Supports JS/TS (via TypeScript AST), Python, Go, Rust, Java, C#, Kotlin, PHP, Swift
 - Extracts imports/exports and builds a dependency graph with `import` and `testOf` edges
 - Test files are linked to their source files via import analysis and naming conventions
+- Each symbol includes a condensed `signature` (one line, max 200 chars) and a short `snippet` preview — agents can inspect likely definitions from the index without opening files
 - Index stored per-project in `.devctx/index.json`, invalidated by file mtime
 - `incremental=true`: only reindex files with changed mtime — much faster for large repos. Falls back to full rebuild if no prior index exists.
 - Run once after checkout or when many files changed; not required but recommended
@@ -300,21 +317,21 @@ One-call context planner that replaces the manual `smart_search` → `smart_read
 - Intentionally blocks shell operators and unsafe commands
 - Useful for `pwd`, `git status`, `rg`, `ls`, `find`, and other low-risk diagnostics
 
-## Evaluations
+## Evaluations (repo development only)
 
-The project includes an eval harness with a synthetic corpus of 26 tasks. Current results with intent + index:
-
-- **P@5**: 0.962 | **Pass rate**: 25/26 (96%) | **Wrong-file rate**: 0.115
-- **Latency p50/p95**: 9/11ms | **Retrieval honesty**: 0.962
+The eval harness and corpora live in `tools/devctx/evals/` and are **not included in the npm package**. Clone this repo to run evaluations.
 
 ```bash
 cd tools/devctx
-npm run eval              # full run with index + intent
-npm run eval -- --baseline  # baseline without index/intent for comparison
-npm run eval:report       # scorecard with delta vs baseline
+npm run eval                # synthetic corpus with index + intent
+npm run eval -- --baseline  # baseline without index/intent
+npm run eval:self           # self-eval against the real devctx repo
+npm run eval:context        # evaluate smart_context alongside search
+npm run eval:both           # search + context evaluation
+npm run eval:report         # scorecard with delta vs baseline
 ```
 
-The harness supports `--root=` and `--corpus=` for evaluating against real repos with custom task corpora.
+The harness supports `--root=`, `--corpus=`, and `--tool=search|context|both` for evaluating against any repo. When `--tool=context`, pass/fail is governed by `smart_context` precision; `--tool=both` requires both search and context to pass. Token metrics (`totalTokens`) reflect the full JSON response payload. Reports include confidence calibration (accuracy, over/under-confident rates) and, for `smart_context`, explanation coverage (`reasonIncluded` + `evidence`), preview coverage (`symbolPreviews`), preview symbol recall, and context precision.
 
 ## Notes
 

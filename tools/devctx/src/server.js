@@ -30,7 +30,7 @@ export const createDevctxServer = () => {
 
   server.tool(
     'smart_read',
-    'Read a file with token-efficient modes. outline/signatures: compact structure (~90% savings). range: specific line range with line numbers. symbol: extract function/class/method by name (string or array for batch). full: file content capped at 12k chars. maxTokens: token budget — auto-selects the most detailed mode that fits (full -> outline -> signatures -> truncated). Responses are cached in memory per session and invalidated by file mtime; cached=true when served from cache. Supports JS/TS, Python, Go, Rust, Java, shell, Terraform, Dockerfile, SQL, JSON, TOML, YAML.',
+    'Read a file with token-efficient modes. outline/signatures: compact structure (~90% savings). range: specific line range with line numbers. symbol: extract function/class/method by name (string or array for batch). full: file content capped at 12k chars. maxTokens: token budget — auto-selects the most detailed mode that fits (full -> outline -> signatures -> truncated). context=true (symbol mode only): includes callers, tests, and referenced types from the dependency graph; returns graphCoverage (imports/tests: full|partial|none) so the agent knows how reliable the cross-file context is. Responses are cached in memory per session and invalidated by file mtime; cached=true when served from cache. Every response includes a unified confidence block: { parser, truncated, cached, graphCoverage? }. Supports JS/TS, Python, Go, Rust, Java, C#, Kotlin, PHP, Swift, shell, Terraform, Dockerfile, SQL, JSON, TOML, YAML.',
     {
       filePath: z.string(),
       mode: z.enum(['full', 'outline', 'signatures', 'range', 'symbol']).optional(),
@@ -38,9 +38,10 @@ export const createDevctxServer = () => {
       endLine: z.number().optional(),
       symbol: z.union([z.string(), z.array(z.string())]).optional(),
       maxTokens: z.number().int().min(1).optional(),
+      context: z.boolean().optional(),
     },
-    async ({ filePath, mode = 'outline', startLine, endLine, symbol, maxTokens }) =>
-      asTextResult(await smartRead({ filePath, mode, startLine, endLine, symbol, maxTokens })),
+    async ({ filePath, mode = 'outline', startLine, endLine, symbol, maxTokens, context }) =>
+      asTextResult(await smartRead({ filePath, mode, startLine, endLine, symbol, maxTokens, context })),
   );
 
   server.tool(
@@ -63,7 +64,7 @@ export const createDevctxServer = () => {
 
   server.tool(
     'smart_search',
-    'Search code across the project using ripgrep (with filesystem fallback). Returns grouped, ranked results. Optional intent (implementation/debug/tests/config/docs/explore) adjusts ranking: tests boosts test files, config boosts config files, docs reduces penalty on READMEs. Includes retrievalConfidence and provenance metadata.',
+    'Search code across the project using ripgrep (with filesystem fallback). Returns grouped, ranked results. Optional intent (implementation/debug/tests/config/docs/explore) adjusts ranking: tests boosts test files, config boosts config files, docs reduces penalty on READMEs. Includes a unified confidence block: { level, indexFreshness } plus retrievalConfidence and provenance metadata.',
     {
       query: z.string(),
       cwd: z.string().optional(),
@@ -74,21 +75,23 @@ export const createDevctxServer = () => {
 
   server.tool(
     'smart_context',
-    'Get curated context for a task in one call. Combines smart_search + smart_read + graph expansion. Returns relevant files (outline/signatures), related tests, dependencies, and symbol details — optimized for tokens. Replaces the manual search → read → read cycle. Optional intent override, token budget, and diff mode (pass diff=true for HEAD or diff="main" to scope context to changed files only).',
+    'Get curated context for a task in one call. Combines smart_search + smart_read + graph expansion. Returns relevant files, evidence for why each file was included, related tests, dependencies, symbol previews from the index, and symbol details — optimized for tokens. Includes a unified confidence block: { indexFreshness, graphCoverage } indicating index state and how complete the relational context is. Replaces the manual search → read → read cycle. Optional intent override, token budget, diff mode (pass diff=true for HEAD or diff="main" to scope context to changed files only), detail mode (minimal=index+signatures+snippets, balanced=default, deep=full content), and include array to control which fields are returned (["content","graph","hints","symbolDetail"]).',
     {
       task: z.string(),
       intent: z.enum(['implementation', 'debug', 'tests', 'config', 'docs', 'explore']).optional(),
       maxTokens: z.number().optional(),
       entryFile: z.string().optional(),
       diff: z.union([z.boolean(), z.string()]).optional(),
+      detail: z.enum(['minimal', 'balanced', 'deep']).optional(),
+      include: z.array(z.enum(['content', 'graph', 'hints', 'symbolDetail'])).optional(),
     },
-    async ({ task, intent, maxTokens, entryFile, diff }) =>
-      asTextResult(await smartContext({ task, intent, maxTokens, entryFile, diff })),
+    async ({ task, intent, maxTokens, entryFile, diff, detail, include }) =>
+      asTextResult(await smartContext({ task, intent, maxTokens, entryFile, diff, detail, include })),
   );
 
   server.tool(
     'smart_shell',
-    'Run a diagnostic shell command from an allowlist. Allowed: pwd, ls, find, rg, git (status/diff/show/log/branch/rev-parse), npm/pnpm/yarn/bun (test/run/lint/build/typecheck/check). Blocks shell operators, pipes, and unsafe commands.',
+    'Run a diagnostic shell command from an allowlist. Allowed: pwd, ls, find, rg, git (status/diff/show/log/branch/rev-parse), npm/pnpm/yarn/bun (test/run/lint/build/typecheck/check). Blocks shell operators, pipes, and unsafe commands. Includes a unified confidence block: { blocked, timedOut }.',
     {
       command: z.string(),
     },

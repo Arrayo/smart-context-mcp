@@ -2,209 +2,301 @@
   {
     "id": "find-def-01",
     "taskType": "find-definition",
-    "description": "Find where validateToken is defined",
+    "description": "where does token validation happen in the auth flow?",
     "query": "validateToken",
-    "expectedFiles": ["src/auth/middleware.js"],
-    "expectedSymbols": ["validateToken"]
+    "expectedFiles": [
+      "src/auth/middleware.js"
+    ],
+    "expectedSymbols": [
+      "validateToken"
+    ]
   },
   {
     "id": "find-def-02",
     "taskType": "find-definition",
-    "description": "Find the UserRepository class",
+    "description": "which file owns UserRepository?",
     "query": "UserRepository",
-    "expectedFiles": ["src/models/user.js"],
-    "expectedSymbols": ["UserRepository"]
+    "expectedFiles": [
+      "src/models/user.js"
+    ],
+    "expectedSymbols": [
+      "UserRepository"
+    ]
   },
   {
     "id": "find-def-03",
     "taskType": "find-definition",
-    "description": "Find createJwt function",
+    "description": "where is JWT creation implemented?",
     "query": "createJwt",
-    "expectedFiles": ["src/utils/jwt.js"],
-    "expectedSymbols": ["createJwt"]
+    "expectedFiles": [
+      "src/utils/jwt.js"
+    ],
+    "expectedSymbols": [
+      "createJwt"
+    ]
   },
   {
     "id": "find-def-04",
     "taskType": "find-definition",
-    "description": "Find the LRUCache struct in Go",
+    "description": "where does the Go cache define LRUCache?",
     "query": "LRUCache",
-    "expectedFiles": ["pkg/cache/lru.go"],
-    "expectedSymbols": ["LRUCache"]
+    "expectedFiles": [
+      "pkg/cache/lru.go"
+    ],
+    "expectedSymbols": [
+      "LRUCache"
+    ]
   },
   {
     "id": "find-def-05",
     "taskType": "find-definition",
-    "description": "Find EmailNotifier class in Python",
+    "description": "which Python file owns the email notifier?",
     "query": "EmailNotifier",
-    "expectedFiles": ["services/notification.py"],
-    "expectedSymbols": ["EmailNotifier"]
+    "expectedFiles": [
+      "services/notification.py"
+    ],
+    "expectedSymbols": [
+      "EmailNotifier"
+    ]
   },
   {
     "id": "find-def-06",
     "taskType": "find-definition",
-    "description": "Find the Logger class",
+    "description": "where is the shared logger class implemented?",
     "query": "Logger",
-    "expectedFiles": ["src/utils/logger.js"],
-    "expectedSymbols": ["Logger"]
+    "expectedFiles": [
+      "src/utils/logger.js"
+    ],
+    "expectedSymbols": [
+      "Logger"
+    ]
   },
   {
     "id": "debug-01",
     "taskType": "debug",
-    "description": "Find where auth tokens are rejected with 403",
+    "description": "where in auth do we reject invalid tokens with 403?",
     "query": "403",
-    "expectedFiles": ["src/auth/middleware.js"],
-    "expectedSymbols": ["validateToken"]
+    "expectedFiles": [
+      "src/auth/middleware.js"
+    ],
+    "expectedSymbols": [
+      "validateToken"
+    ]
   },
   {
     "id": "debug-02",
     "taskType": "debug",
-    "description": "Find error handling in user creation",
+    "description": "which file handles the create-user failure path?",
     "query": "Failed to create user",
-    "expectedFiles": ["src/api/users.js"],
-    "expectedSymbols": ["createUser"]
+    "expectedFiles": [
+      "src/api/users.js"
+    ],
+    "expectedSymbols": [
+      "createUser"
+    ]
   },
   {
     "id": "debug-03",
     "taskType": "debug",
-    "description": "Find where 409 conflict is returned",
+    "description": "which file returns the user already exists conflict?",
     "query": "already exists",
-    "expectedFiles": ["src/api/users.js"],
-    "expectedSymbols": ["createUser"]
+    "expectedFiles": [
+      "src/api/users.js"
+    ],
+    "expectedSymbols": [
+      "createUser"
+    ]
   },
   {
     "id": "debug-04",
     "taskType": "debug",
-    "description": "Find SMTP error handling",
+    "description": "where does notification sending handle SMTP failures?",
     "query": "SMTPException",
-    "expectedFiles": ["services/notification.py"],
-    "expectedSymbols": ["send_email"]
+    "expectedFiles": [
+      "services/notification.py"
+    ],
+    "expectedSymbols": [
+      "send_email"
+    ]
   },
   {
     "id": "review-01",
     "taskType": "review",
-    "description": "Review auth middleware structure",
+    "description": "review the auth flow entry point and main middleware",
     "query": "AuthMiddleware",
-    "expectedFiles": ["src/auth/middleware.js"],
-    "expectedSymbols": ["AuthMiddleware"]
+    "expectedFiles": [
+      "src/auth/middleware.js"
+    ],
+    "expectedSymbols": [
+      "AuthMiddleware"
+    ]
   },
   {
     "id": "review-02",
     "taskType": "review",
-    "description": "Review user API endpoints",
+    "description": "review the user creation API flow",
     "query": "createUser",
-    "expectedFiles": ["src/api/users.js"],
-    "expectedSymbols": ["createUser"]
+    "expectedFiles": [
+      "src/api/users.js"
+    ],
+    "expectedSymbols": [
+      "createUser"
+    ]
   },
   {
     "id": "review-03",
     "taskType": "review",
-    "description": "Review cache eviction logic",
+    "description": "review the cache eviction path",
     "query": "evict",
-    "expectedFiles": ["pkg/cache/lru.go"],
-    "expectedSymbols": ["evict"]
+    "expectedFiles": [
+      "pkg/cache/lru.go"
+    ],
+    "expectedSymbols": [
+      "evict"
+    ]
   },
   {
     "id": "tests-01",
     "taskType": "tests",
-    "description": "Find existing auth tests",
+    "description": "which existing test exercises auth middleware?",
     "query": "AuthMiddleware",
-    "expectedFiles": ["tests/auth.test.js"],
-    "expectedSymbols": ["AuthMiddleware"]
+    "expectedFiles": [
+      "tests/auth.test.js"
+    ],
+    "expectedSymbols": [
+      "AuthMiddleware"
+    ]
   },
   {
     "id": "tests-02",
     "taskType": "tests",
-    "description": "Find tests for UserRepository",
+    "description": "where are UserRepository behaviors covered in tests?",
     "query": "UserRepository",
-    "expectedFiles": ["tests/users.test.js"],
-    "expectedSymbols": ["UserRepository"]
+    "expectedFiles": [
+      "tests/users.test.js"
+    ],
+    "expectedSymbols": [
+      "UserRepository"
+    ]
   },
   {
     "id": "tests-03",
     "taskType": "tests",
-    "description": "Find where findByEmail is tested",
+    "description": "which test covers findByEmail?",
     "query": "findByEmail",
-    "expectedFiles": ["tests/users.test.js"],
+    "expectedFiles": [
+      "tests/users.test.js"
+    ],
     "expectedSymbols": []
   },
   {
     "id": "refactor-01",
     "taskType": "refactor",
-    "description": "Understand user model API surface",
+    "description": "I need the public surface of the user model before refactoring",
     "query": "UserRepository",
-    "expectedFiles": ["src/models/user.js"],
-    "expectedSymbols": ["UserRepository"]
+    "expectedFiles": [
+      "src/models/user.js"
+    ],
+    "expectedSymbols": [
+      "UserRepository"
+    ]
   },
   {
     "id": "refactor-02",
     "taskType": "refactor",
-    "description": "Understand notification service API",
+    "description": "I need the notification service API surface before refactoring",
     "query": "send_email",
-    "expectedFiles": ["services/notification.py"],
-    "expectedSymbols": ["send_email"]
+    "expectedFiles": [
+      "services/notification.py"
+    ],
+    "expectedSymbols": [
+      "send_email"
+    ]
   },
   {
     "id": "config-01",
     "taskType": "config",
-    "description": "Find database configuration",
+    "description": "where is the database wired from configuration?",
     "query": "database",
-    "expectedFiles": ["config/database.json"],
+    "expectedFiles": [
+      "config/database.json"
+    ],
     "expectedSymbols": []
   },
   {
     "id": "config-02",
     "taskType": "config",
-    "description": "Find JWT secret configuration",
+    "description": "where does the app load the JWT secret?",
     "query": "jwtSecret",
-    "expectedFiles": ["config/app.yaml"],
+    "expectedFiles": [
+      "config/app.yaml"
+    ],
     "expectedSymbols": []
   },
   {
     "id": "config-03",
     "taskType": "config",
-    "description": "Find rate limit settings",
+    "description": "where are rate limit settings declared?",
     "query": "rateLimit",
-    "expectedFiles": ["config/app.yaml"],
+    "expectedFiles": [
+      "config/app.yaml"
+    ],
     "expectedSymbols": []
   },
   {
     "id": "onboard-01",
     "taskType": "onboard",
-    "description": "Find the main API file for users",
+    "description": "I am onboarding: what file handles user endpoints?",
     "query": "users",
-    "expectedFiles": ["src/api/users.js"],
-    "expectedSymbols": ["createUser", "getUser", "listUsers"]
+    "expectedFiles": [
+      "src/api/users.js"
+    ],
+    "expectedSymbols": [
+      "createUser",
+      "getUser",
+      "listUsers"
+    ]
   },
   {
     "id": "onboard-02",
     "taskType": "onboard",
-    "description": "Understand project dependencies",
+    "description": "I am onboarding: where are project dependencies declared?",
     "query": "dependencies",
-    "expectedFiles": ["package.json"],
+    "expectedFiles": [
+      "package.json"
+    ],
     "expectedSymbols": []
   },
   {
     "id": "onboard-03",
     "taskType": "onboard",
-    "description": "Find Dockerfile for deployment info",
+    "description": "I am onboarding: which file defines the deployment container?",
     "query": "FROM",
-    "expectedFiles": ["Dockerfile"],
+    "expectedFiles": [
+      "Dockerfile"
+    ],
     "expectedSymbols": []
   },
   {
     "id": "explore-01",
     "taskType": "explore",
-    "description": "Find all password-related logic",
+    "description": "where is password logic split across the codebase?",
     "query": "password",
-    "expectedFiles": ["src/api/users.js", "services/notification.py"],
+    "expectedFiles": [
+      "src/api/users.js",
+      "services/notification.py"
+    ],
     "expectedSymbols": []
   },
   {
     "id": "explore-02",
     "taskType": "explore",
-    "description": "Find all email-related code",
+    "description": "where does email-related logic live across the app?",
     "query": "email",
-    "expectedFiles": ["src/api/users.js", "services/notification.py"],
+    "expectedFiles": [
+      "src/api/users.js",
+      "services/notification.py"
+    ],
     "expectedSymbols": []
   }
 ]

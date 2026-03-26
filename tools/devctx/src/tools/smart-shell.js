@@ -125,6 +125,7 @@ const buildBlockedResult = async (command, message) => {
     exitCode: 126,
     blocked: true,
     output: message,
+    confidence: { blocked: true, timedOut: false },
     metrics,
   };
 };
@@ -202,6 +203,7 @@ export const smartShell = async ({ command }) => {
     exitCode: execution.code,
     blocked: false,
     output: compressedText,
+    confidence: { blocked: false, timedOut: !!execution.timedOut },
     metrics,
   };
 
