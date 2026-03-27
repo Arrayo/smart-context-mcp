@@ -1,5 +1,8 @@
 # smart-context-mcp
 
+[![npm version](https://badge.fury.io/js/smart-context-mcp.svg)](https://www.npmjs.com/package/smart-context-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **MCP server that reduces AI agent token usage by 90% and improves response quality.**
 
 Instead of reading entire files and repeating context, this MCP provides 7 smart tools that compress, rank, and maintain context efficiently.
@@ -556,3 +559,13 @@ Metrics include: P@5, P@10, Recall, wrong-file rate, retrieval honesty, follow-u
 Source repository and full project documentation:
 
 - https://github.com/Arrayo/devctx-mcp-mvp
+
+## Author
+
+**Francisco Caballero Portero**  
+Email: fcp1978@hotmail.com  
+GitHub: [@Arrayo](https://github.com/Arrayo)
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.

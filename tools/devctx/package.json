@@ -1,6 +1,6 @@
 {
   "name": "smart-context-mcp",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "MCP server that reduces agent token usage and improves response quality with compact file summaries, ranked code search, and curated context.",
   "author": "Francisco Caballero Portero <fcp1978@hotmail.com>",
   "type": "module",

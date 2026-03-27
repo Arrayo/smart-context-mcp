@@ -1,5 +1,8 @@
 # smart-context-mcp
 
+[![npm version](https://badge.fury.io/js/smart-context-mcp.svg)](https://www.npmjs.com/package/smart-context-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **MCP server that reduces AI agent token usage by 90% and improves response quality.**
 
 Instead of reading entire files and repeating context, this MCP provides 7 smart tools that compress, rank, and maintain context efficiently.
@@ -543,3 +546,13 @@ The harness supports `--root=`, `--corpus=`, and `--tool=search|context|both` fo
 - Conversation sessions stored in `<projectRoot>/.devctx/sessions/` when `smart_summary` is used.
 - `smart_shell` is intentionally conservative by design.
 - Today this is a strong navigation and diagnostics layer, not a full semantic code intelligence system.
+
+## Author
+
+**Francisco Caballero Portero**  
+Email: fcp1978@hotmail.com  
+GitHub: [@Arrayo](https://github.com/Arrayo)
+
+## License
+
+MIT License - see [LICENSE](LICENSE) file for details.

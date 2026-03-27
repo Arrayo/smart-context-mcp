@@ -186,5 +186,5 @@ En este proyecto de desarrollo del MCP:
 ---
 
 **Fecha del reporte:** 2026-03-27  
-**Versión del MCP:** 0.9.0 (pre-release)  
+**Versión del MCP:** 1.0.0  
 **Generado por:** Análisis de `.devctx/metrics.jsonl`
