@@ -123,13 +123,17 @@ export const createDevctxServer = () => {
 
   server.tool(
     'smart_summary',
-    'Maintain compressed conversation state across turns. Actions: get (retrieve current/last session), update (create/replace session), append (add to existing session), reset (clear session), list_sessions (show all sessions). Sessions persist in .devctx/sessions/ with 30-day retention. Auto-generates sessionId from goal if not provided. Returns compressed summary capped at maxTokens (default 500). Tracks: goal, status, completed steps, key decisions, blockers, next step, touched files.',
+    'Maintain compressed conversation state across turns. Actions: get (retrieve current/last session), update (create or replace a session; omitted fields are cleared), append (add to existing session), reset (clear session), list_sessions (show all sessions). Sessions persist in .devctx/sessions/ with 30-day retention. Auto-generates sessionId from goal if not provided. Returns a resume summary capped at maxTokens (default 500) plus compression metadata (`truncated`, `compressionLevel`, `omitted`) and `schemaVersion`. Tracks: goal, status, pinned context, unresolved questions, current focus, blockers, next step, completed steps, key decisions, and touched files.',
     {
       action: z.enum(['get', 'update', 'append', 'reset', 'list_sessions']),
       sessionId: z.string().optional(),
       update: z.object({
         goal: z.string().optional(),
-        status: z.string().optional(),
+        status: z.enum(['planning', 'in_progress', 'blocked', 'completed']).optional(),
+        pinnedContext: z.array(z.string()).optional(),
+        unresolvedQuestions: z.array(z.string()).optional(),
+        currentFocus: z.string().optional(),
+        whyBlocked: z.string().optional(),
         completed: z.array(z.string()).optional(),
         decisions: z.array(z.string()).optional(),
         blockers: z.array(z.string()).optional(),

@@ -288,6 +288,26 @@ describe('metrics reporting', () => {
     assert.equal(report.summary.tools[0].count, 2);
     assert.equal(report.summary.tools[0].savedTokens, 280);
   });
+
+  it('reports smart_summary metrics when entries use finalTokens', async () => {
+    await fsp.mkdir(path.dirname(tmpMetricsFile), { recursive: true });
+    const lines = [
+      { tool: 'smart_summary', action: 'update', sessionId: 'sess-1', rawTokens: 220, finalTokens: 140, timestamp: '2026-03-26T10:00:00.000Z' },
+      { tool: 'smart_summary', action: 'get', sessionId: 'sess-1', rawTokens: 180, finalTokens: 120, timestamp: '2026-03-26T10:05:00.000Z' },
+    ];
+    await fsp.writeFile(tmpMetricsFile, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`, 'utf8');
+
+    const scriptPath = path.resolve(__dirname, '..', 'scripts', 'report-metrics.js');
+    const { stdout } = await execFile(process.execPath, [scriptPath, '--file', tmpMetricsFile, '--json']);
+    const report = JSON.parse(stdout);
+
+    assert.equal(report.summary.count, 2);
+    assert.equal(report.summary.rawTokens, 400);
+    assert.equal(report.summary.compressedTokens, 260);
+    assert.equal(report.summary.savedTokens, 140);
+    assert.equal(report.summary.tools[0].tool, 'smart_summary');
+    assert.equal(report.summary.tools[0].savedTokens, 140);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -511,6 +531,13 @@ describe('devctx-init agent rules', () => {
     assert.match(result, /Some existing rules/);
     assert.match(result, /devctx:start/);
     assert.match(result, /smart_read/);
+  });
+
+  it('writes the current Node executable into Codex config by default', async () => {
+    await execFile(process.execPath, [initScript, '--target', tmpDir, '--clients', 'codex']);
+
+    const config = await fsp.readFile(path.join(tmpDir, '.codex', 'config.toml'), 'utf8');
+    assert.match(config, new RegExp(`command = ${JSON.stringify(process.execPath).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   });
 
   it('adds .devctx to the target gitignore', async () => {

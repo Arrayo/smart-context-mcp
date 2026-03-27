@@ -6,6 +6,9 @@ import { persistMetrics } from '../metrics.js';
 
 const MAX_SESSION_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_TOKENS = 500;
+const VALID_STATUSES = new Set(['planning', 'in_progress', 'blocked', 'completed']);
+const DEFAULT_STATUS = 'in_progress';
+const SESSION_SCHEMA_VERSION = 2;
 
 const getSessionsDir = () => path.join(projectRoot, '.devctx', 'sessions');
 const getActiveSessionFile = () => path.join(getSessionsDir(), 'active.json');
@@ -45,6 +48,7 @@ const saveSession = (sessionId, data) => {
   const sessionPath = getSessionPath(sessionId);
   const sessionData = {
     ...data,
+    schemaVersion: SESSION_SCHEMA_VERSION,
     sessionId,
     updatedAt: new Date().toISOString(),
   };
@@ -63,8 +67,16 @@ const getActiveSession = () => {
   }
   try {
     const { sessionId } = JSON.parse(fs.readFileSync(activeSessionFile, 'utf8'));
-    return loadSession(sessionId);
+    const activeSession = loadSession(sessionId);
+    if (!activeSession) {
+      fs.unlinkSync(activeSessionFile);
+      return null;
+    }
+    return activeSession;
   } catch {
+    try {
+      fs.unlinkSync(activeSessionFile);
+    } catch {}
     return null;
   }
 };
@@ -138,109 +150,142 @@ const truncateString = (str, maxLength) => {
   return str.slice(0, maxLength - 3) + '...';
 };
 
+const normalizeStatus = (status, fallback = DEFAULT_STATUS) =>
+  VALID_STATUSES.has(status) ? status : fallback;
+
+const isMeaningfulString = (value) => typeof value === 'string' && value.trim().length > 0;
+
+const compactFilePath = (filePath) => {
+  if (!isMeaningfulString(filePath)) {
+    return filePath;
+  }
+
+  const normalized = filePath.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length <= 3 && normalized.length <= 60) {
+    return normalized;
+  }
+
+  const tail = parts.slice(-3).join('/');
+  return normalized.length <= tail.length ? normalized : `.../${tail}`;
+};
+
+const validateUpdateInput = (update) => {
+  if (!update || typeof update !== 'object') {
+    throw new Error('update parameter is required for update/append actions');
+  }
+
+  if (update.status !== undefined && !VALID_STATUSES.has(update.status)) {
+    throw new Error(`Invalid status: ${update.status}. Valid statuses: planning, in_progress, blocked, completed`);
+  }
+};
+
+const mergeUniqueStrings = (...lists) => {
+  const seen = new Set();
+  const result = [];
+
+  for (const list of lists) {
+    for (const item of list || []) {
+      if (!isMeaningfulString(item) || seen.has(item)) {
+        continue;
+      }
+      seen.add(item);
+      result.push(item);
+    }
+  }
+
+  return result;
+};
+
+const uniqueTail = (items, limit) => mergeUniqueStrings(items || []).slice(-limit);
+const uniqueHead = (items, limit) => mergeUniqueStrings(items || []).slice(0, limit);
+
+const buildSummaryMetrics = (rawTokens, finalTokens) => ({
+  rawTokens,
+  finalTokens,
+  compressedTokens: finalTokens,
+  savedTokens: Math.max(0, rawTokens - finalTokens),
+});
+
+const pruneEmptyFields = (value) =>
+  Object.fromEntries(
+    Object.entries(value).filter(([, item]) => {
+      if (item === undefined || item === null || item === '') {
+        return false;
+      }
+      if (Array.isArray(item) && item.length === 0) {
+        return false;
+      }
+      return true;
+    }),
+  );
+
+const buildResumeSummary = (data) => {
+  const status = normalizeStatus(data.status);
+  const whyBlocked = status === 'blocked'
+    ? (isMeaningfulString(data.whyBlocked) ? data.whyBlocked : (data.blockers || []).find(isMeaningfulString))
+    : undefined;
+  const completed = mergeUniqueStrings(data.completed);
+  const decisions = mergeUniqueStrings(data.decisions);
+  const touchedFiles = mergeUniqueStrings(data.touchedFiles);
+
+  return pruneEmptyFields({
+    status,
+    nextStep: isMeaningfulString(data.nextStep) ? data.nextStep : undefined,
+    pinnedContext: uniqueHead(data.pinnedContext, 3),
+    unresolvedQuestions: uniqueHead(data.unresolvedQuestions, 3),
+    currentFocus: isMeaningfulString(data.currentFocus) ? data.currentFocus : undefined,
+    whyBlocked,
+    goal: isMeaningfulString(data.goal) ? data.goal : undefined,
+    recentCompleted: uniqueTail(completed, 3),
+    keyDecisions: uniqueTail(decisions, 2),
+    hotFiles: uniqueTail(touchedFiles.map(compactFilePath), 5),
+    completedCount: data.completedCount ?? completed.length,
+    decisionsCount: data.decisionsCount ?? decisions.length,
+    touchedFilesCount: data.touchedFilesCount ?? touchedFiles.length,
+  });
+};
+
 const compressSummary = (data, maxTokens) => {
-  let compressed = {
-    goal: data.goal,
-    status: data.status,
-    completed: data.completed?.slice(-5) || [],
-    decisions: data.decisions?.slice(-3) || [],
-    blockers: data.blockers || [],
-    nextStep: data.nextStep,
-    touchedFiles: [...new Set(data.touchedFiles || [])].slice(-10),
-  };
-  
+  const baseSummary = buildResumeSummary(data);
+  let compressed = baseSummary;
   let summary = JSON.stringify(compressed, null, 2);
   let tokens = countTokens(summary);
-  
+
   if (tokens <= maxTokens) {
-    return { compressed, tokens, truncated: false };
-  }
-  
-  compressed.completed = compressed.completed.slice(-3);
-  compressed.decisions = compressed.decisions.slice(-2);
-  compressed.touchedFiles = compressed.touchedFiles.slice(-5);
-  
-  summary = JSON.stringify(compressed, null, 2);
-  tokens = countTokens(summary);
-  
-  if (tokens <= maxTokens) {
-    return { compressed, tokens, truncated: true };
-  }
-  
-  compressed.goal = truncateString(compressed.goal, 100);
-  compressed.status = truncateString(compressed.status, 50);
-  compressed.nextStep = truncateString(compressed.nextStep, 150);
-  compressed.blockers = compressed.blockers.map(b => truncateString(b, 100));
-  compressed.decisions = compressed.decisions.map(d => truncateString(d, 150));
-  compressed.completed = compressed.completed.map(c => truncateString(c, 80));
-  compressed.touchedFiles = compressed.touchedFiles.map(f => truncateString(f, 80));
-  
-  summary = JSON.stringify(compressed, null, 2);
-  tokens = countTokens(summary);
-  
-  if (tokens <= maxTokens) {
-    return { compressed, tokens, truncated: true };
-  }
-  
-  compressed.completed = compressed.completed.slice(-2);
-  compressed.decisions = compressed.decisions.slice(-1);
-  compressed.touchedFiles = compressed.touchedFiles.slice(-3);
-  compressed.blockers = compressed.blockers.slice(-2);
-  
-  summary = JSON.stringify(compressed, null, 2);
-  tokens = countTokens(summary);
-  
-  if (tokens > maxTokens) {
-    compressed.completed = compressed.completed.slice(-1);
-    compressed.touchedFiles = compressed.touchedFiles.slice(-2);
-    compressed.decisions = [];
-    compressed.blockers = compressed.blockers.slice(-1);
-    
-    summary = JSON.stringify(compressed, null, 2);
-    tokens = countTokens(summary);
-    
-    if (tokens > maxTokens) {
-      compressed.goal = truncateString(compressed.goal, 50);
-      compressed.status = truncateString(compressed.status, 30);
-      compressed.nextStep = truncateString(compressed.nextStep, 80);
-      compressed.touchedFiles = compressed.touchedFiles.slice(-1);
-      compressed.blockers = compressed.blockers.slice(0, 1).map(b => truncateString(b, 50));
-      
-      summary = JSON.stringify(compressed, null, 2);
-      tokens = countTokens(summary);
-      
-      if (tokens > maxTokens) {
-        compressed.goal = truncateString(compressed.goal, 30);
-        compressed.status = truncateString(compressed.status, 20);
-        compressed.nextStep = truncateString(compressed.nextStep, 50);
-        compressed.completed = [];
-        compressed.decisions = [];
-        compressed.touchedFiles = [];
-        compressed.blockers = [];
-        
-        summary = JSON.stringify(compressed, null, 2);
-        tokens = countTokens(summary);
-      }
-    }
+    return { compressed, tokens, truncated: false, omitted: [], compressionLevel: 'none' };
   }
 
   const recomputeTokens = () => {
+    compressed = pruneEmptyFields(compressed);
     summary = JSON.stringify(compressed, null, 2);
     tokens = countTokens(summary);
   };
 
-  const shrinkScalarField = (field) => {
+  const shrinkScalarField = (field, { removable = true } = {}) => {
     const value = compressed[field];
-    if (typeof value !== 'string' || value.length === 0) {
+    if (!isMeaningfulString(value)) {
       return false;
     }
 
-    if (value.length <= 8) {
-      compressed[field] = '';
+    if (value.length <= 12) {
+      if (!removable) {
+        return false;
+      }
+      delete compressed[field];
       return true;
     }
 
-    compressed[field] = truncateString(value, Math.max(4, Math.floor(value.length * 0.6)));
+    const next = truncateString(value, Math.max(4, Math.floor(value.length * 0.6)));
+    if (!next || next === value) {
+      if (!removable) {
+        return false;
+      }
+      delete compressed[field];
+      return true;
+    }
+
+    compressed[field] = next;
     return true;
   };
 
@@ -256,13 +301,13 @@ const compressSummary = (data, maxTokens) => {
     }
 
     const [item] = value;
-    if (typeof item !== 'string' || item.length === 0) {
-      compressed[field] = [];
+    if (!isMeaningfulString(item)) {
+      delete compressed[field];
       return true;
     }
 
-    if (item.length <= 8) {
-      compressed[field] = [];
+    if (item.length <= 12) {
+      delete compressed[field];
       return true;
     }
 
@@ -270,51 +315,72 @@ const compressSummary = (data, maxTokens) => {
     return true;
   };
 
-  if (tokens > maxTokens) {
-    const shrinkers = [
-      () => shrinkArrayField('completed'),
-      () => shrinkArrayField('decisions'),
-      () => shrinkArrayField('blockers'),
-      () => shrinkArrayField('touchedFiles'),
-      () => shrinkScalarField('goal'),
-      () => shrinkScalarField('status'),
-      () => shrinkScalarField('nextStep'),
-    ];
+  const reductionSteps = [
+    () => shrinkArrayField('recentCompleted'),
+    () => shrinkArrayField('keyDecisions'),
+    () => shrinkArrayField('hotFiles'),
+    () => shrinkArrayField('unresolvedQuestions'),
+    () => shrinkScalarField('goal'),
+    () => shrinkScalarField('currentFocus'),
+    () => shrinkScalarField('whyBlocked'),
+    () => shrinkArrayField('pinnedContext'),
+    () => shrinkScalarField('nextStep', { removable: false }),
+  ];
 
-    let madeProgress = true;
+  let madeProgress = true;
 
-    while (tokens > maxTokens && madeProgress) {
-      madeProgress = false;
+  while (tokens > maxTokens && madeProgress) {
+    madeProgress = false;
 
-      for (const shrink of shrinkers) {
-        if (!shrink()) {
-          continue;
-        }
+    for (const reduce of reductionSteps) {
+      if (!reduce()) {
+        continue;
+      }
 
-        recomputeTokens();
-        madeProgress = true;
+      recomputeTokens();
+      madeProgress = true;
 
-        if (tokens <= maxTokens) {
-          break;
-        }
+      if (tokens <= maxTokens) {
+        break;
       }
     }
   }
 
+  if (tokens > maxTokens && isMeaningfulString(compressed.nextStep)) {
+    while (tokens > maxTokens && shrinkScalarField('nextStep')) {
+      recomputeTokens();
+    }
+  }
+
   if (tokens > maxTokens) {
-    compressed = {
-      goal: '',
-      status: '',
-      completed: [],
-      decisions: [],
-      blockers: [],
-      nextStep: '',
-      touchedFiles: [],
-    };
+    compressed = pruneEmptyFields({
+      status: normalizeStatus(data.status),
+      nextStep: isMeaningfulString(data.nextStep) ? data.nextStep : undefined,
+      pinnedContext: uniqueHead(data.pinnedContext, 1),
+      completedCount: data.completedCount ?? mergeUniqueStrings(data.completed).length,
+      decisionsCount: data.decisionsCount ?? mergeUniqueStrings(data.decisions).length,
+      touchedFilesCount: data.touchedFilesCount ?? mergeUniqueStrings(data.touchedFiles).length,
+    });
+    recomputeTokens();
+
+    while (tokens > maxTokens && isMeaningfulString(compressed.nextStep) && shrinkScalarField('nextStep')) {
+      recomputeTokens();
+    }
+  }
+
+  if (tokens > maxTokens) {
+    compressed = { status: normalizeStatus(data.status) };
     recomputeTokens();
   }
-  
-  return { compressed, tokens, truncated: true };
+
+  const omitted = Object.keys(baseSummary).filter((key) => !(key in compressed));
+  const compressionLevel = Object.keys(compressed).length === 1 && compressed.status
+    ? 'status_only'
+    : omitted.length > 0
+      ? 'reduced'
+      : 'trimmed';
+
+  return { compressed, tokens, truncated: true, omitted, compressionLevel };
 };
 
 export const smartSummary = async ({ action, sessionId, update, maxTokens = DEFAULT_MAX_TOKENS }) => {
@@ -358,14 +424,16 @@ export const smartSummary = async ({ action, sessionId, update, maxTokens = DEFA
       };
     }
     
-    const { compressed, tokens } = compressSummary(session, maxTokens);
+    const { compressed, tokens, truncated, omitted, compressionLevel } = compressSummary(session, maxTokens);
     
+    const rawTokens = countTokens(JSON.stringify(session));
+    const summaryMetrics = buildSummaryMetrics(rawTokens, tokens);
+
     persistMetrics({
       tool: 'smart_summary',
       action: 'get',
       sessionId: targetSessionId,
-      rawTokens: countTokens(JSON.stringify(session)),
-      finalTokens: tokens,
+      ...summaryMetrics,
       latencyMs: Date.now() - startTime,
     });
     
@@ -375,6 +443,10 @@ export const smartSummary = async ({ action, sessionId, update, maxTokens = DEFA
       found: true,
       summary: compressed,
       tokens,
+      truncated,
+      omitted,
+      compressionLevel,
+      schemaVersion: session.schemaVersion ?? 1,
       updatedAt: session.updatedAt,
     };
   }
@@ -413,9 +485,7 @@ export const smartSummary = async ({ action, sessionId, update, maxTokens = DEFA
   }
   
   if (action === 'update' || action === 'append') {
-    if (!update || typeof update !== 'object') {
-      throw new Error('update parameter is required for update/append actions');
-    }
+    validateUpdateInput(update);
     
     let targetSessionId = sessionId;
     let existingData = {};
@@ -439,35 +509,61 @@ export const smartSummary = async ({ action, sessionId, update, maxTokens = DEFA
       }
     }
     
-    const mergedData = action === 'append' 
+    const resolvedStatus = normalizeStatus(update.status, normalizeStatus(existingData.status));
+    const completed = action === 'append'
+      ? mergeUniqueStrings(existingData.completed, update.completed)
+      : mergeUniqueStrings(update.completed);
+    const decisions = action === 'append'
+      ? mergeUniqueStrings(existingData.decisions, update.decisions)
+      : mergeUniqueStrings(update.decisions);
+    const touchedFiles = action === 'append'
+      ? mergeUniqueStrings(existingData.touchedFiles, update.touchedFiles)
+      : mergeUniqueStrings(update.touchedFiles);
+    const mergedData = action === 'append'
       ? {
-          goal: update.goal || existingData.goal,
-          status: update.status || existingData.status,
-          completed: [...(existingData.completed || []), ...(update.completed || [])],
-          decisions: [...(existingData.decisions || []), ...(update.decisions || [])],
-          blockers: update.blockers !== undefined ? update.blockers : existingData.blockers,
-          nextStep: update.nextStep || existingData.nextStep,
-          touchedFiles: [...new Set([...(existingData.touchedFiles || []), ...(update.touchedFiles || [])])],
+          goal: update.goal || existingData.goal || 'Untitled session',
+          status: resolvedStatus,
+          pinnedContext: mergeUniqueStrings(existingData.pinnedContext, update.pinnedContext),
+          unresolvedQuestions: mergeUniqueStrings(existingData.unresolvedQuestions, update.unresolvedQuestions),
+          currentFocus: update.currentFocus || existingData.currentFocus || '',
+          whyBlocked: update.whyBlocked || existingData.whyBlocked || '',
+          completed,
+          decisions,
+          blockers: update.blockers !== undefined ? mergeUniqueStrings(update.blockers) : (existingData.blockers || []),
+          nextStep: update.nextStep || existingData.nextStep || '',
+          touchedFiles,
+          completedCount: completed.length,
+          decisionsCount: decisions.length,
+          touchedFilesCount: touchedFiles.length,
         }
       : {
-          goal: update.goal || existingData.goal || 'Untitled session',
-          status: update.status || existingData.status || 'in_progress',
-          completed: update.completed || existingData.completed || [],
-          decisions: update.decisions || existingData.decisions || [],
-          blockers: update.blockers !== undefined ? update.blockers : (existingData.blockers || []),
-          nextStep: update.nextStep || existingData.nextStep || '',
-          touchedFiles: update.touchedFiles || existingData.touchedFiles || [],
+          goal: update.goal || 'Untitled session',
+          status: normalizeStatus(update.status),
+          pinnedContext: mergeUniqueStrings(update.pinnedContext),
+          unresolvedQuestions: mergeUniqueStrings(update.unresolvedQuestions),
+          currentFocus: update.currentFocus ?? '',
+          whyBlocked: update.whyBlocked ?? '',
+          completed,
+          decisions,
+          blockers: mergeUniqueStrings(update.blockers),
+          nextStep: update.nextStep ?? '',
+          touchedFiles,
+          completedCount: completed.length,
+          decisionsCount: decisions.length,
+          touchedFilesCount: touchedFiles.length,
         };
     
     const savedData = saveSession(targetSessionId, mergedData);
-    const { compressed, tokens, truncated } = compressSummary(savedData, maxTokens);
+    const { compressed, tokens, truncated, omitted, compressionLevel } = compressSummary(savedData, maxTokens);
     
+    const rawTokens = countTokens(JSON.stringify(savedData));
+    const summaryMetrics = buildSummaryMetrics(rawTokens, tokens);
+
     persistMetrics({
       tool: 'smart_summary',
       action,
       sessionId: targetSessionId,
-      rawTokens: countTokens(JSON.stringify(savedData)),
-      finalTokens: tokens,
+      ...summaryMetrics,
       latencyMs: Date.now() - startTime,
     });
     
@@ -477,6 +573,9 @@ export const smartSummary = async ({ action, sessionId, update, maxTokens = DEFA
       summary: compressed,
       tokens,
       truncated,
+      omitted,
+      compressionLevel,
+      schemaVersion: savedData.schemaVersion,
       updatedAt: savedData.updatedAt,
       message: action === 'append' ? 'Session updated incrementally.' : 'Session saved.',
     };

@@ -361,7 +361,7 @@ Maintain compressed conversation state across sessions. Solves the context-loss 
 
 | Action | Purpose | Returns |
 |--------|---------|---------|
-| `get` | Retrieve current or specified session | Compressed summary (≤500 tokens) |
+| `get` | Retrieve current or specified session | Resume summary (≤500 tokens) + compression metadata |
 | `update` | Create or replace session | New session with compressed state |
 | `append` | Add to existing session | Merged session state |
 | `reset` | Clear session | Confirmation |
@@ -373,6 +373,10 @@ Maintain compressed conversation state across sessions. Solves the context-loss 
 - `update` (required for update/append) — object with:
   - `goal`: primary objective
   - `status`: current state (`planning` | `in_progress` | `blocked` | `completed`)
+  - `pinnedContext`: critical context that should survive compression when possible
+  - `unresolvedQuestions`: open questions that matter for the next turn
+  - `currentFocus`: current work area in one short phrase
+  - `whyBlocked`: blocker summary when status is `blocked`
   - `completed`: array of completed steps
   - `decisions`: array of key decisions with rationale
   - `blockers`: array of current blockers
@@ -380,18 +384,33 @@ Maintain compressed conversation state across sessions. Solves the context-loss 
   - `touchedFiles`: array of modified files
 - `maxTokens` (optional, default 500) — hard cap on summary size
 
+`update` replaces the stored session state for that `sessionId`, so omitted fields are cleared. Use `append` when you want to keep existing state and add progress incrementally.
+
 **Storage:**
 - Sessions persist in `.devctx/sessions/<sessionId>.json`
 - Active session tracked in `.devctx/sessions/active.json`
 - 30-day retention for inactive sessions
 - No expiration for active sessions
 
+**Resume summary fields:**
+- `status` and `nextStep` are preserved with highest priority
+- `pinnedContext` and `unresolvedQuestions` preserve critical context and open questions
+- `currentFocus` and `whyBlocked` are included when relevant
+- `recentCompleted`, `keyDecisions`, and `hotFiles` are derived from the persisted state
+- `completedCount`, `decisionsCount`, and `touchedFilesCount` preserve activity scale cheaply
+- Empty fields are omitted to save tokens
+
+**Response metadata:**
+- `schemaVersion`: persisted session schema version
+- `truncated`: whether the resume summary had to be compressed
+- `compressionLevel`: `none` | `trimmed` | `reduced` | `status_only`
+- `omitted`: fields dropped from the resume summary to fit the token budget
+
 **Compression strategy:**
-- Keeps last 5 completed steps (discards older)
-- Keeps last 3 decisions (discards older)
-- Keeps last 10 touched files (deduplicates)
-- Prioritizes blockers and next step
-- Auto-truncates if exceeds `maxTokens`
+- Keeps the persisted session state intact and compresses only the resume summary
+- Prioritizes `nextStep`, `status`, and active blockers over history
+- Deduplicates repeated completed steps, decisions, and touched files
+- Uses token-aware reduction until the summary fits `maxTokens`
 
 **Example workflow:**
 

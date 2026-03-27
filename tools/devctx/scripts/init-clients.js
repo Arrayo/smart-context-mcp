@@ -20,7 +20,7 @@ const parseArgs = (argv) => {
   const options = {
     target: process.cwd(),
     name: 'devctx',
-    command: 'node',
+    command: process.execPath,
     args: null,
     clients: [...supportedClients],
     dryRun: false,

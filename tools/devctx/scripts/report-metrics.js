@@ -90,6 +90,16 @@ const readEntries = (filePath) => {
   return { entries, invalidLines };
 };
 
+const getCompressedTokens = (entry) => Number(entry.compressedTokens ?? entry.finalTokens ?? 0);
+
+const getSavedTokens = (entry, compressedTokens) => {
+  if (entry.savedTokens !== undefined) {
+    return Number(entry.savedTokens ?? 0);
+  }
+
+  return Math.max(0, Number(entry.rawTokens ?? 0) - compressedTokens);
+};
+
 const aggregate = (entries) => {
   const byTool = new Map();
   let rawTokens = 0;
@@ -98,6 +108,8 @@ const aggregate = (entries) => {
 
   for (const entry of entries) {
     const tool = entry.tool ?? 'unknown';
+    const compressedTokensForEntry = getCompressedTokens(entry);
+    const savedTokensForEntry = getSavedTokens(entry, compressedTokensForEntry);
     const current = byTool.get(tool) ?? {
       tool,
       count: 0,
@@ -108,13 +120,13 @@ const aggregate = (entries) => {
 
     current.count += 1;
     current.rawTokens += Number(entry.rawTokens ?? 0);
-    current.compressedTokens += Number(entry.compressedTokens ?? 0);
-    current.savedTokens += Number(entry.savedTokens ?? 0);
+    current.compressedTokens += compressedTokensForEntry;
+    current.savedTokens += savedTokensForEntry;
     byTool.set(tool, current);
 
     rawTokens += Number(entry.rawTokens ?? 0);
-    compressedTokens += Number(entry.compressedTokens ?? 0);
-    savedTokens += Number(entry.savedTokens ?? 0);
+    compressedTokens += compressedTokensForEntry;
+    savedTokens += savedTokensForEntry;
   }
 
   const tools = [...byTool.values()]

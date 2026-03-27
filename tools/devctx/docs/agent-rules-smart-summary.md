@@ -26,12 +26,16 @@ After weekend: smart_summary(get) → full context restored → continue
 - **goal**: Primary objective (never changes unless pivoting)
 - **status**: `planning` | `in_progress` | `blocked` | `completed`
 - **nextStep**: Immediate next action (critical for resume)
+- **pinnedContext**: 1-3 critical constraints or decisions that must survive compression
+- **currentFocus**: Current active area in a short phrase
 - **touchedFiles**: Files modified in this session
 
 ### Include when relevant:
 - **completed**: Steps finished (append incrementally)
 - **decisions**: Key architectural/technical decisions with brief rationale
 - **blockers**: Current blockers preventing progress
+- **unresolvedQuestions**: Open questions that should be answered next
+- **whyBlocked**: One-line blocker summary when `status` is `blocked`
 
 ### Do NOT track:
 - Implementation details (code snippets, function names)
@@ -48,6 +52,9 @@ After weekend: smart_summary(get) → full context restored → continue
 smart_summary({ 
   action: "append",
   update: {
+    pinnedContext: ["JWT access token stays at 1h unless product asks otherwise"],
+    unresolvedQuestions: ["Do refresh tokens need device scoping?"],
+    currentFocus: "RBAC middleware",
     completed: ["JWT middleware", "login endpoint"],
     decisions: ["1h access token + 7d refresh", "bcrypt rounds=12"],
     touchedFiles: ["src/auth/middleware.js", "src/routes/auth.js"],
@@ -88,4 +95,4 @@ smart_summary({
 
 Default 500 tokens is sufficient for most sessions. Increase to 1000-2000 only for complex multi-week projects with many decisions.
 
-Compression is automatic — older completed steps and decisions are pruned to fit the budget.
+Compression is automatic — the tool keeps the full session state, then derives a resume summary that preserves `status`, `nextStep`, and active blockers first.
