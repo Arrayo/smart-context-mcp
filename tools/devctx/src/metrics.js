@@ -129,9 +129,10 @@ const appendLegacyMetricsFile = async (entry) => {
 };
 
 export const persistMetrics = async (entry) => {
+  let enrichedEntry = entry;
+
   try {
     const resolvedInput = resolveMetricsInput();
-    let enrichedEntry = entry;
     const safety = getSqliteSafetyPolicy();
 
     if (!safety.shouldBlock) {
@@ -146,7 +147,11 @@ export const persistMetrics = async (entry) => {
         }
       });
     }
+  } catch {
+    // best-effort — never fail a tool call for metrics
+  }
 
+  try {
     await appendLegacyMetricsFile(enrichedEntry);
   } catch {
     // best-effort — never fail a tool call for metrics

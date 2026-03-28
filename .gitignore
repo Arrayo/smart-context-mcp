@@ -4,7 +4,10 @@ node_modules/
 .cursor/mcp.json
 .codex/
 .qwen/
+.claude/
 .mcp.json
+AGENTS.md
+CLAUDE.md
 
 # Note: .cursor/rules/ should be committed (agent rules for the project)
 
