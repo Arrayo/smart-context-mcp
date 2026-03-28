@@ -17,6 +17,14 @@ import {
   withStateDb,
 } from '../src/storage/sqlite.js';
 
+const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+const SKIP_SQLITE_TESTS = nodeMajor < 22;
+
+if (SKIP_SQLITE_TESTS) {
+  test('sqlite-storage tests require Node 22+', { skip: 'SQLite support requires Node 22+' }, () => {});
+  process.exit(0);
+}
+
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

@@ -9,7 +9,10 @@ import { smartMetrics } from '../src/tools/smart-metrics.js';
 import { withStateDb } from '../src/storage/sqlite.js';
 import { projectRoot, setProjectRoot } from '../src/utils/runtime-config.js';
 
-test('smart_metrics - aggregates totals for an explicit session filter', async () => {
+const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+const SKIP_SQLITE_TESTS = nodeMajor < 22;
+
+test('smart_metrics - aggregates totals for an explicit session filter', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-metrics-tool-'));
   const metricsFile = path.join(tmpRoot, '.devctx', 'metrics.jsonl');
   const previousMetricsFile = process.env.DEVCTX_METRICS_FILE;
@@ -80,7 +83,7 @@ test('smart_metrics - supports tool filtering and recent entry ordering', async 
   }
 });
 
-test('smart_metrics - uses SQLite storage by default when no metrics file override is set', async () => {
+test('smart_metrics - uses SQLite storage by default when no metrics file override is set', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-metrics-sqlite-'));
   const previousProjectRoot = projectRoot;
   const previousMetricsFile = process.env.DEVCTX_METRICS_FILE;
@@ -127,7 +130,7 @@ test('smart_metrics - uses SQLite storage by default when no metrics file overri
   }
 });
 
-test('smart_metrics - suppresses SQLite side effects and global metric writes when state sqlite is tracked or staged', async () => {
+test('smart_metrics - suppresses SQLite side effects and global metric writes when state sqlite is tracked or staged', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-metrics-blocked-'));
   const previousProjectRoot = projectRoot;
   const previousMetricsFile = process.env.DEVCTX_METRICS_FILE;
@@ -190,7 +193,7 @@ test('smart_metrics - suppresses SQLite side effects and global metric writes wh
   }
 });
 
-test('smart_metrics - reports context overhead from hook and wrapper metrics metadata', async () => {
+test('smart_metrics - reports context overhead from hook and wrapper metrics metadata', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-metrics-overhead-'));
   const previousProjectRoot = projectRoot;
   const previousMetricsFile = process.env.DEVCTX_METRICS_FILE;

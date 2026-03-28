@@ -8,6 +8,14 @@ import { smartSummary } from '../src/tools/smart-summary.js';
 import { ACTIVE_SESSION_SCOPE, SQLITE_SCHEMA_VERSION, withStateDb } from '../src/storage/sqlite.js';
 import { projectRoot, setProjectRoot } from '../src/utils/runtime-config.js';
 
+const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+const SKIP_SQLITE_TESTS = nodeMajor < 22;
+
+if (SKIP_SQLITE_TESTS) {
+  test('smart_summary tests require Node 22+', { skip: 'SQLite support requires Node 22+' }, () => {});
+  process.exit(0);
+}
+
 const originalProjectRoot = projectRoot;
 let summaryTestRoot = null;
 const getSessionsDir = () => path.join(projectRoot, '.devctx', 'sessions');
