@@ -17,6 +17,22 @@ import { createProgressReporter } from '../streaming.js';
 import { createHash } from 'node:crypto';
 import { getReadCache, setReadCache } from '../storage/sqlite.js';
 
+const safeGetReadCache = async (args) => {
+  try {
+    return await getReadCache(args);
+  } catch {
+    return null;
+  }
+};
+
+const safeSetReadCache = async (args) => {
+  try {
+    await setReadCache(args);
+  } catch {
+    // best-effort — never fail a read for cache persistence
+  }
+};
+
 const execFile = promisify(execFileCb);
 import { summarizeGo, summarizeRust, summarizeJava, summarizeShell, summarizeTerraform, summarizeDockerfile, summarizeSql, extractGoSymbol, extractRustSymbol, extractJavaSymbol, summarizeCsharp, extractCsharpSymbol, summarizeKotlin, extractKotlinSymbol, summarizePhp, extractPhpSymbol, summarizeSwift, extractSwiftSymbol } from './smart-read/additional-languages.js';
 import { summarizeCode, extractCodeSymbol } from './smart-read/code.js';
@@ -276,7 +292,7 @@ const cachedGenerate = async (fullPath, extension, content, mode, mtime, root = 
 
   const relPath = path.relative(root, fullPath).replace(/\\/g, '/');
   const contentHash = buildContentHash(content);
-  const persistent = await getReadCache({ relPath, mode, selector, contentHash });
+  const persistent = await safeGetReadCache({ relPath, mode, selector, contentHash });
   if (persistent?.payload?.text) {
     setCache(key, mtime, persistent.payload.text);
     return { text: persistent.payload.text, cached: true };
@@ -284,7 +300,7 @@ const cachedGenerate = async (fullPath, extension, content, mode, mtime, root = 
 
   const text = generateContent(fullPath, extension, content, mode);
   setCache(key, mtime, text);
-  await setReadCache({ relPath, mode, selector, contentHash, payload: { text }, tokens: countTokens(text) });
+  await safeSetReadCache({ relPath, mode, selector, contentHash, payload: { text }, tokens: countTokens(text) });
   return { text, cached: false };
 };
 
@@ -297,7 +313,7 @@ const cachedSymbol = async (fullPath, content, symbol, mtime, root = projectRoot
 
   const relPath = path.relative(root, fullPath).replace(/\\/g, '/');
   const contentHash = buildContentHash(content);
-  const persistent = await getReadCache({ relPath, mode: 'symbol', selector: extra, contentHash });
+  const persistent = await safeGetReadCache({ relPath, mode: 'symbol', selector: extra, contentHash });
   if (persistent?.payload?.text) {
     setCache(key, mtime, { text: persistent.payload.text, indexHint: persistent.payload.indexHint });
     return { text: persistent.payload.text, indexHint: persistent.payload.indexHint, cached: true };
@@ -305,7 +321,7 @@ const cachedSymbol = async (fullPath, content, symbol, mtime, root = projectRoot
 
   const result = generateSymbolContent(fullPath, content, symbol);
   setCache(key, mtime, { text: result.text, indexHint: result.indexHint });
-  await setReadCache({ relPath, mode: 'symbol', selector: extra, contentHash, payload: result, tokens: countTokens(result.text) });
+  await safeSetReadCache({ relPath, mode: 'symbol', selector: extra, contentHash, payload: result, tokens: countTokens(result.text) });
   return { ...result, cached: false };
 };
 
