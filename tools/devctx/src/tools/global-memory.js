@@ -5,6 +5,9 @@ import {
   deleteEntry,
   listKinds,
   getStats,
+  recordNoiseHint,
+  getNoiseHints,
+  resetNoiseHints,
   isGlobalMemoryEnabled,
   VALID_GLOBAL_KINDS,
 } from '../global-memory/store.js';
@@ -13,7 +16,7 @@ import { projectRoot } from '../utils/paths.js';
 import { recordDevctxOperation } from '../missed-opportunities.js';
 import { recordDecision, DECISION_REASONS, EXPECTED_BENEFITS } from '../decision-explainer.js';
 
-const VALID_ACTIONS = new Set(['save', 'recall', 'list', 'delete', 'stats', 'mark_used']);
+const VALID_ACTIONS = new Set(['save', 'recall', 'list', 'delete', 'stats', 'mark_used', 'noise_stats', 'noise_reset']);
 
 export const globalMemory = async ({
   action = 'stats',
@@ -91,6 +94,14 @@ export const globalMemory = async ({
       default: {
         const stats = await getStats();
         return { success: true, action: 'stats', ...stats };
+      }
+      case 'noise_stats': {
+        const result = await getNoiseHints({ projectPath: projectScope ? projectRoot : null, limit: limit ?? 50 });
+        return { success: true, action, ...result };
+      }
+      case 'noise_reset': {
+        const result = await resetNoiseHints({ projectPath: projectScope ? projectRoot : null, hintKey: query });
+        return { success: true, action, ...result };
       }
     }
   } catch (err) {

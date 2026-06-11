@@ -2,6 +2,80 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.20.0] - 2026-06-11
+
+Minor release. Same 20 tools — no additions, no removals — but several gain new parameters and richer response fields focused on **hard token-budget control**, **search-mode discipline**, and **second-read cache reuse**. `SQLITE_SCHEMA_VERSION` bumps 7 → 8 (new `read_cache` table). `~/.devctx/global.db` schema bumps 1 → 2 (new `noise_hints` table). Both migrate automatically on first run. **Zero new runtime dependencies.**
+
+### Added — shared `tokenBudget` across tools
+- New `tokenBudget` parameter on `smart_read`, `smart_read_batch`, `smart_context`, `smart_turn` (both `start` and `end`) and `smart_resume`. Accepts either a plain `number` or `{ id?, maxTokens, shared? }`.
+- When `shared: true` (or `id` is set), the budget state is shared across calls in the same task — a multi-step agent flow can stay under a hard token ceiling **without per-call bookkeeping**.
+- Responses surface `taskBudget`, `remainingBudget`, and (when the budget actually changed the output) `budgetDetails` with `scope` (`content` | `batch` | `response`), `actions` taken, and the final degraded mode.
+- New module `src/utils/task-budget.js` (`normalizeTokenBudget`, `resolveTokenBudgetWindow`, `peekRemainingBudget`, `consumeTokenBudget`, `clearTaskBudgets`).
+- Test suite: `tests/task-budget.test.js`.
+
+### Added — `smart_search` search modes
+- New `mode: 'needle' | 'balanced' | 'semantic'` parameter. Default: `'balanced'`.
+  - `needle` — literal exact only. No regex. No term expansion. Kills noise on debug / error-string queries.
+  - `balanced` — exact + regex + term expansion (previous behaviour).
+  - `semantic` — exact-first plus the local semantic block when the exact signal is weak.
+- The legacy `semantic: true` flag is preserved as an alias for `mode: 'semantic'`.
+- New `maxTokens` parameter caps the whole response payload. Compaction order: `matches` truncated first, then diagnostics, then the optional semantic block is reduced or omitted.
+- Per-file ranking is now inspectable: `matchedBy`, `boostSource`, `scoreBreakdown`, `whyRanked`. Top-level response includes `hasMore`, `totalFiles`, `nextSuggestedMaxFiles` for incremental expansion.
+- Actionable `suggestions` returned when the query is too broad or returns nothing useful (mode change, kind filter, narrower terms).
+- Default `maxFiles` tightened **15 → 5** to match real agent usage and let `nextSuggestedMaxFiles` drive expansion explicitly.
+
+### Added — `smart_read` persistent cache + budget-aware `full` degradation
+- New SQLite table `read_cache` (`SQLITE_SCHEMA_VERSION 8`, auto-migrating) keyed by `(filePath, mode, selector, content_hash)`. Second read of an unchanged file is virtually free.
+- New `getReadCache`, `setReadCache`, `clearReadCachePersistent` in `src/storage/sqlite.js`, plus GC integration in `runStorageMaintenance` (same retention window as the other caches).
+- Mode `full` is now an **explicit last resort**: when `tokenBudget`/`maxTokens` is set, `smart_read` degrades to lighter modes first (outline → signatures → truncated) and reports the real mode used in `fullMode` plus `budgetDetails`. No silent truncation.
+- `smart_read_batch` enforces the same logic at batch level: early-stop reports `budgetDetails` with `scope: 'batch'` and the list of files actually read.
+- Test suite: `tests/smart-read-persistent-cache.test.js`.
+
+### Added — `smart_turn` simple-task skip heuristic
+- When the prompt is short (≤ 40 chars after whitespace normalization), classified as a simple task (`isSimpleTask` policy), and no session/task is pinned, `smart_turn(start)` now returns `skipSmartTurn: true` with `recommendedPath.mode='simple_task_skip'` instead of paying the full continuity / refresh-context orchestration cost.
+- `minimal` verbosity additionally compacts the start payload via `compactSummaryForMinimal` and conditionally drops `summary` / `refreshedContext` when the agent does not need them (no blocked state, no ambiguity, no possible task shift). `refreshedContext` is always preserved when it carries `topFiles`, to keep the focus-list contract that downstream tools rely on.
+- `smart_resume` inherits the same behaviour via `tokenBudget` plumbing.
+
+### Added — `global_memory` noise hints
+- Global DB schema bumps 1 → 2: new `noise_hints` table keyed by `(project_hash, hint_key)` tracking `reason` (`'search_noise'` by default), `hits`, `created_at`, `updated_at`. Project paths remain hashed (FNV-1a) before storage.
+- New tool actions: `noise_stats` (inspect repo-local noise hints) and `noise_reset` (clear all hints for the current project, or only the entry matching `query`).
+- New store APIs `recordNoiseHint` / `getNoiseHints` exposed so `smart_search` can learn from past noisy queries per project without ever persisting raw content.
+
+### Added — KPI baseline infrastructure
+- New scripts `evals/kpi-baseline.js` and `evals/kpi-utils.js`. They run the existing `harness.js` and `realworld-eval.js` once and produce a single JSON snapshot containing:
+  - Top-5 precision.
+  - Recall.
+  - Reread task rate.
+  - Reread call rate.
+  - Per-task-size buckets (`short` / `long`) with `count`, `avgTokens`, `avgLatencyMs`.
+- Persists `kpi-baseline-latest.json` + a timestamped copy in `evals/results/`, ready for regression checks in CI.
+- Test suite: `tests/eval-kpis.test.js`.
+
+### Changed
+- `smart_read` description (server schema) rewritten to reflect budget-aware `full` degradation and the new `budgetDetails` contract.
+- `smart_read_batch` description updated to document `scope: 'batch'` early-stop reporting.
+- `smart_search` description updated to document `mode`, `maxTokens`, the new per-file ranking fields, `hasMore` / `nextSuggestedMaxFiles`, and `suggestions`.
+- `global_memory` description and action `enum` extended with `noise_stats` / `noise_reset`.
+- Default `maxFiles` in `smart_search` lowered to 5 (was 15). Old callers that need more should pass `maxFiles` explicitly or follow `nextSuggestedMaxFiles`.
+
+### Storage
+- `SQLITE_SCHEMA_VERSION`: 7 → 8 (new `read_cache` table + indexes). `EXPECTED_TABLES` updated.
+- `~/.devctx/global.db` schema: 1 → 2 (new `noise_hints` table). Migrations are forward-only and idempotent.
+
+### Fixed (rolled-up from `1.19.x` HEAD)
+- CI on Node 18 / 20: SQLite-bound suites conditionally skip when `node:sqlite` is unavailable. Coverage on Node 22+ unchanged. (`bd9e16c`)
+- Fixture index regenerated to `INDEX_VERSION 7` so cached `smart_read explain` tests resolve correctly. (`bd9e16c`)
+- `STOP_WORDS` now includes `"via"` for cleaner token streams. (`bd9e16c`)
+
+### Documentation
+- README `What You Get` block corrected: 20 tools listed in full instead of the stale `Tools (12)` + `And 7 more`. `metrics.jsonl` no longer described as an automatic Node 18-20 fallback — it is **opt-in** via `DEVCTX_METRICS_FILE`. Storage section now references `INDEX_VERSION 7` and the opt-in `~/.devctx/global.db`. (`05007e7`)
+- Hard benchmark report `docs/verification/v1.18.1-vs-v1.19.0.md` added with reproducible commands. (`7fd2255`)
+
+### Verification
+- Full test suite green on Node 22+ (new suites: `task-budget`, `smart-read-persistent-cache`, `eval-kpis`).
+- CI matrix Node 18 / 20: green (SQLite-bound suites skipped, all other suites pass).
+- Storage migrations (`v7 → v8`, global `v1 → v2`) verified via fresh-install + upgrade smoke runs.
+
 ## [1.19.0] - 2026-05-12
 
 Five-step quality jump executed as sequential commits with full dogfooding. MCP grows from 18 → **20 tools** (`smart_playbook` + `global_memory`). +68 new tests, **zero new dependencies**, suite green at 882/883 (1 skipped, 0 fail). Index schema bumped 6 → 7 (auto-reindex on first run).

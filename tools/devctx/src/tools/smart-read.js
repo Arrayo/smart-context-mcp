@@ -9,10 +9,13 @@ import { isDockerfile, readTextFile } from '../utils/fs.js';
 import { projectRoot } from '../utils/paths.js';
 import { truncate } from '../utils/text.js';
 import { countTokens } from '../tokenCounter.js';
+import { consumeTokenBudget, normalizeTokenBudget, resolveTokenBudgetWindow } from '../utils/task-budget.js';
 import { recordToolUsage } from '../usage-feedback.js';
 import { recordDecision, DECISION_REASONS, EXPECTED_BENEFITS } from '../decision-explainer.js';
 import { recordDevctxOperation } from '../missed-opportunities.js';
 import { createProgressReporter } from '../streaming.js';
+import { createHash } from 'node:crypto';
+import { getReadCache, setReadCache } from '../storage/sqlite.js';
 
 const execFile = promisify(execFileCb);
 import { summarizeGo, summarizeRust, summarizeJava, summarizeShell, summarizeTerraform, summarizeDockerfile, summarizeSql, extractGoSymbol, extractRustSymbol, extractJavaSymbol, summarizeCsharp, extractCsharpSymbol, summarizeKotlin, extractKotlinSymbol, summarizePhp, extractPhpSymbol, summarizeSwift, extractSwiftSymbol } from './smart-read/additional-languages.js';
@@ -43,6 +46,8 @@ const MAX_CACHE_ENTRIES = 200;
 
 const buildCacheKey = (fullPath, mode, extra) =>
   extra ? `${fullPath}::${mode}::${extra}` : `${fullPath}::${mode}`;
+
+const buildContentHash = (content) => createHash('sha256').update(content).digest('hex');
 
 const getFileMtime = (fullPath) => Math.floor(fs.statSync(fullPath).mtimeMs);
 
@@ -154,7 +159,55 @@ const resolveParserType = (extension, fullPath) => {
   return 'fallback';
 };
 
-const MODE_CASCADE = ['full', 'outline', 'signatures'];
+const MODE_BUDGET_CASCADE = {
+  full: ['signatures', 'outline'],
+  signatures: ['signatures', 'outline'],
+  outline: ['outline'],
+};
+
+const getBudgetCascade = (mode) => MODE_BUDGET_CASCADE[mode] ?? [mode];
+
+const buildFullModeMetadata = ({ requestedMode, effectiveMode, validBudget }) => {
+  if (requestedMode !== 'full') {
+    return null;
+  }
+
+  if (effectiveMode === 'full') {
+    return {
+      requested: true,
+      used: true,
+      reason: 'explicit_request',
+    };
+  }
+
+  return {
+    requested: true,
+    used: false,
+    reason: validBudget ? 'degraded_for_budget' : 'not_used',
+    fallbackMode: effectiveMode,
+  };
+};
+
+const buildBudgetDetails = ({ requestedMode, effectiveMode, validBudget, truncated }) => {
+  if (!validBudget) {
+    return null;
+  }
+
+  const actions = [];
+  if (effectiveMode !== requestedMode) actions.push('mode_degraded');
+  if (truncated) actions.push('content_truncated');
+
+  if (actions.length === 0) {
+    return null;
+  }
+
+  return {
+    scope: 'content',
+    maxTokens: validBudget,
+    finalMode: effectiveMode,
+    actions,
+  };
+};
 
 const generateContent = (fullPath, extension, content, mode) => {
   if (mode === 'full') return truncate(content, 12000);
@@ -207,27 +260,52 @@ const truncateByTokens = (text, maxTokens) => {
     tokens += lineTokens;
   }
 
-  kept.push(marker);
-  return kept.join('\n');
+  let result = `${kept.join('\n')}${marker}`;
+  while (kept.length > 0 && countTokens(result) > maxTokens) {
+    kept.pop();
+    result = `${kept.join('\n')}${marker}`;
+  }
+
+  return result;
 };
 
-const cachedGenerate = (fullPath, extension, content, mode, mtime) => {
+const cachedGenerate = async (fullPath, extension, content, mode, mtime, root = projectRoot, selector = '') => {
   const key = buildCacheKey(fullPath, mode);
   const hit = getCached(key, mtime);
   if (hit !== null) return { text: hit, cached: true };
+
+  const relPath = path.relative(root, fullPath).replace(/\\/g, '/');
+  const contentHash = buildContentHash(content);
+  const persistent = await getReadCache({ relPath, mode, selector, contentHash });
+  if (persistent?.payload?.text) {
+    setCache(key, mtime, persistent.payload.text);
+    return { text: persistent.payload.text, cached: true };
+  }
+
   const text = generateContent(fullPath, extension, content, mode);
   setCache(key, mtime, text);
+  await setReadCache({ relPath, mode, selector, contentHash, payload: { text }, tokens: countTokens(text) });
   return { text, cached: false };
 };
 
-const cachedSymbol = (fullPath, content, symbol, mtime) => {
+const cachedSymbol = async (fullPath, content, symbol, mtime, root = projectRoot) => {
   const symbols = Array.isArray(symbol) ? symbol : [symbol];
   const extra = symbols.join(',');
   const key = buildCacheKey(fullPath, 'symbol', extra);
   const hit = getCached(key, mtime);
   if (hit !== null) return { text: hit.text, indexHint: hit.indexHint, cached: true };
+
+  const relPath = path.relative(root, fullPath).replace(/\\/g, '/');
+  const contentHash = buildContentHash(content);
+  const persistent = await getReadCache({ relPath, mode: 'symbol', selector: extra, contentHash });
+  if (persistent?.payload?.text) {
+    setCache(key, mtime, { text: persistent.payload.text, indexHint: persistent.payload.indexHint });
+    return { text: persistent.payload.text, indexHint: persistent.payload.indexHint, cached: true };
+  }
+
   const result = generateSymbolContent(fullPath, content, symbol);
   setCache(key, mtime, { text: result.text, indexHint: result.indexHint });
+  await setReadCache({ relPath, mode: 'symbol', selector: extra, contentHash, payload: result, tokens: countTokens(result.text) });
   return { ...result, cached: false };
 };
 
@@ -410,9 +488,11 @@ const formatContextSections = (sections) => {
   return parts.length > 0 ? '\n' + parts.join('\n') : '';
 };
 
-export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine, symbol, maxTokens, context: includeContext, cwd, progress: enableProgress = false }) => {
+export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine, symbol, maxTokens, tokenBudget, context: includeContext, cwd, progress: enableProgress = false }) => {
   const progress = enableProgress ? createProgressReporter('smart_read') : null;
   const startTime = Date.now();
+  const normalizedTokenBudget = normalizeTokenBudget(tokenBudget);
+  const budgetWindow = resolveTokenBudgetWindow({ tokenBudget: normalizedTokenBudget, maxTokens });
   
   let fullPath, content;
   const effectiveRoot = cwd || projectRoot;
@@ -448,11 +528,13 @@ export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine
   const extension = path.extname(fullPath).toLowerCase();
   const mtime = getFileMtime(fullPath);
 
-  const validBudget = Number.isFinite(maxTokens) && maxTokens >= 1 ? maxTokens : null;
+  const effectiveMaxTokens = budgetWindow.effectiveMaxTokens;
+  const validBudget = Number.isFinite(effectiveMaxTokens) && effectiveMaxTokens >= 1 ? effectiveMaxTokens : null;
   let effectiveMode = mode;
   let indexHintUsed = false;
   let compressedText;
   let cacheHit = false;
+  let fullModeMetadata = null;
 
   if (mode === 'range') {
     const r = cachedRange(content, startLine, endLine, fullPath, mtime);
@@ -463,15 +545,24 @@ export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine
     const start = Math.max(0, (startLine ?? 1) - 1);
     const end = endLine ?? lines.length;
     const rangeContent = lines.slice(start, end).join('\n');
-    const g = cachedGenerate(fullPath, extension, rangeContent, 'outline', mtime);
+    const g = await cachedGenerate(fullPath, extension, rangeContent, 'outline', mtime, effectiveRoot, `${startLine ?? 1}-${endLine ?? ''}`);
     compressedText = g.text;
     cacheHit = g.cached;
     effectiveMode = 'outline';
   } else if (mode === 'symbol') {
-    const sym = cachedSymbol(fullPath, content, symbol, mtime);
+    const sym = await cachedSymbol(fullPath, content, symbol, mtime, effectiveRoot);
     compressedText = sym.text;
     indexHintUsed = sym.indexHint;
     cacheHit = sym.cached;
+    if (validBudget && normalizedTokenBudget?.shared && countTokens(compressedText) > validBudget) {
+      for (const candidate of ['signatures', 'outline']) {
+        const g = await cachedGenerate(fullPath, extension, content, candidate, mtime, effectiveRoot);
+        compressedText = g.text;
+        if (g.cached) cacheHit = true;
+        effectiveMode = candidate;
+        if (countTokens(compressedText) <= validBudget) break;
+      }
+    }
   } else if (mode === 'explain') {
     if (!symbol) {
       compressedText = 'Error: symbol parameter is required for explain mode';
@@ -488,12 +579,20 @@ export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine
       if (anyCached) cacheHit = true;
       indexHintUsed = anyIndex;
     }
+    if (validBudget && normalizedTokenBudget?.shared && countTokens(compressedText) > validBudget) {
+      for (const candidate of ['signatures', 'outline']) {
+        const g = await cachedGenerate(fullPath, extension, content, candidate, mtime, effectiveRoot);
+        compressedText = g.text;
+        if (g.cached) cacheHit = true;
+        effectiveMode = candidate;
+        if (countTokens(compressedText) <= validBudget) break;
+      }
+    }
   } else if (validBudget) {
-    const cascadeFrom = MODE_CASCADE.indexOf(effectiveMode);
-    const cascade = cascadeFrom >= 0 ? MODE_CASCADE.slice(cascadeFrom) : [effectiveMode];
+    const cascade = getBudgetCascade(effectiveMode);
 
     for (const candidate of cascade) {
-      const g = cachedGenerate(fullPath, extension, content, candidate, mtime);
+      const g = await cachedGenerate(fullPath, extension, content, candidate, mtime, effectiveRoot);
       compressedText = g.text;
       if (g.cached) cacheHit = true;
       effectiveMode = candidate;
@@ -504,10 +603,12 @@ export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine
       compressedText = truncateByTokens(compressedText, validBudget);
     }
   } else {
-    const g = cachedGenerate(fullPath, extension, content, mode, mtime);
+    const g = await cachedGenerate(fullPath, extension, content, mode, mtime, effectiveRoot);
     compressedText = g.text;
     cacheHit = g.cached;
   }
+
+  fullModeMetadata = buildFullModeMetadata({ requestedMode: mode, effectiveMode, validBudget });
 
   if (progress) {
     const compressedTokens = countTokens(compressedText);
@@ -542,6 +643,7 @@ export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine
   const rawMode = effectiveMode === 'full' || effectiveMode === 'range';
   const parser = mode === 'explain' ? 'structural' : (rawMode ? 'raw' : resolveParserType(extension, fullPath));
   const truncated = compressedText.includes('[truncated ');
+  const budgetDetails = buildBudgetDetails({ requestedMode: mode, effectiveMode, validBudget, truncated });
 
   const metrics = buildMetrics({
     tool: 'smart_read',
@@ -598,12 +700,23 @@ export const smartRead = async ({ filePath, mode = 'outline', startLine, endLine
     content: compressedText,
   };
   if (mode === 'symbol' || mode === 'explain') result.indexHint = indexHintUsed;
-  if (mode === 'explain') result.cached = cacheHit;
-  if (validBudget && effectiveMode !== mode) {
+  result.cached = cacheHit;
+  if (normalizedTokenBudget) result.taskBudget = normalizedTokenBudget;
+  if (normalizedTokenBudget) {
+    result.remainingBudget = consumeTokenBudget({
+      tokenBudget: normalizedTokenBudget,
+      usedTokens: countTokens(compressedText),
+    });
+  }
+  if (effectiveMode !== mode) {
     result.chosenMode = effectiveMode;
+  }
+  if (budgetDetails) {
     result.budgetApplied = true;
+    result.budgetDetails = budgetDetails;
   }
   if (contextResult) Object.assign(result, contextResult);
+  if (fullModeMetadata) result.fullMode = fullModeMetadata;
 
   return result;
 };

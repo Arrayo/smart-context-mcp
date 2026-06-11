@@ -8,6 +8,7 @@ import { smartSearch } from '../src/tools/smart-search.js';
 import { smartRead } from '../src/tools/smart-read.js';
 import { smartContext } from '../src/tools/smart-context.js';
 import { countTokens } from '../src/tokenCounter.js';
+import { average, bucketTaskSize, summarizeTaskSizes } from './kpi-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = path.resolve(__dirname, 'fixtures', 'sample-project');
@@ -15,6 +16,7 @@ const CORPUS_PATH = path.resolve(__dirname, 'corpus', 'tasks.json');
 const RESULTS_DIR = path.resolve(__dirname, 'results');
 
 const isBaseline = process.argv.includes('--baseline');
+const jsonMode = process.argv.includes('--json');
 
 const getArgValue = (prefix) => {
   const arg = process.argv.find((a) => a.startsWith(prefix));
@@ -255,6 +257,7 @@ const runTask = async (task, root) => {
   return {
     id: task.id,
     taskType: task.taskType,
+    taskSize: bucketTaskSize(task.taskType),
     query: task.query,
     latencyMs,
     totalTokens,
@@ -296,6 +299,9 @@ const computeConfidenceCalibration = (results) => {
 const run = async () => {
   const corpusPath = getArgValue('--corpus=') ? path.resolve(getArgValue('--corpus=')) : CORPUS_PATH;
   const evalRoot = getArgValue('--root=') ? path.resolve(getArgValue('--root=')) : FIXTURE_ROOT;
+  const print = (msg = '') => {
+    if (!jsonMode) process.stdout.write(`${msg}\n`);
+  };
 
   setProjectRoot(evalRoot);
 
@@ -304,10 +310,12 @@ const run = async () => {
     await persistIndex(index, evalRoot);
     const symbolCount = Object.values(index.files).reduce((sum, f) => sum + f.symbols.length, 0);
     const sigCount = Object.values(index.files).reduce((sum, f) => sum + f.symbols.filter((s) => s.signature).length, 0);
-    process.stdout.write(`Index: ${Object.keys(index.files).length} files, ${symbolCount} symbols, ${sigCount} signatures\n`);
-    process.stdout.write(`Tool mode: ${toolMode}\n\n`);
+    print(`Index: ${Object.keys(index.files).length} files, ${symbolCount} symbols, ${sigCount} signatures`);
+    print(`Tool mode: ${toolMode}`);
+    print();
   } else {
-    process.stdout.write('Baseline mode: index and intent disabled\n\n');
+    print('Baseline mode: index and intent disabled');
+    print();
   }
 
   const tasks = JSON.parse(fs.readFileSync(corpusPath, 'utf8'));
@@ -318,7 +326,7 @@ const run = async () => {
     results.push(result);
     const status = result.pass ? 'PASS' : 'FAIL';
     const ctxInfo = result.context ? ` ctx=${result.context.contextPrecision.toFixed(2)} primary=${result.context.primaryHit ? 1 : 0}` : '';
-    process.stdout.write(`  ${status}  ${result.id} (${result.latencyMs}ms, p5=${result.precision5.toFixed(2)}${ctxInfo})\n`);
+    print(`  ${status}  ${result.id} (${result.latencyMs}ms, p5=${result.precision5.toFixed(2)}${ctxInfo})`);
   }
 
   const latencies = results.map((r) => r.latencyMs);
@@ -349,6 +357,14 @@ const run = async () => {
     avgTokens: Math.round(results.reduce((a, r) => a + r.totalTokens, 0) / results.length),
     p50Tokens: percentile(tokenCounts, 50),
     p95Tokens: percentile(tokenCounts, 95),
+    byTaskSize: summarizeTaskSizes(results, (subset) => ({
+      passed: subset.filter((r) => r.pass).length,
+      avgPrecision5: +average(subset, (r) => r.precision5).toFixed(3),
+      avgRecall: +average(subset, (r) => r.recall).toFixed(3),
+      avgLatencyMs: Math.round(average(subset, (r) => r.latencyMs)),
+      avgTokens: Math.round(average(subset, (r) => r.totalTokens)),
+      avgFollowUpReads: +average(subset, (r) => r.followUpReads).toFixed(2),
+    })),
     byTaskType: {},
     results,
   };
@@ -405,6 +421,11 @@ const run = async () => {
   const prefix = isBaseline ? 'eval-baseline' : 'eval';
   const outPath = path.join(RESULTS_DIR, `${prefix}-${Date.now()}.json`);
   fs.writeFileSync(outPath, JSON.stringify(summary, null, 2));
+  if (jsonMode) {
+    process.stdout.write(JSON.stringify({ outPath, summary }, null, 2) + '\n');
+    return summary;
+  }
+
   process.stdout.write(`\nResults: ${outPath}\n`);
   process.stdout.write(`Pass: ${summary.passed}/${summary.totalTasks} | P@5: ${summary.avgPrecision5} | Recall: ${summary.avgRecall} | WrongFile: ${summary.wrongFileRate} | Honesty: ${summary.retrievalHonesty}\n`);
   if (calibration) {
@@ -421,6 +442,13 @@ const run = async () => {
       ? ` | Primary preview recall: ${summary.contextMetrics.avgPrimaryPreviewRecall}`
       : '';
     process.stdout.write(`Context: ${summary.contextMetrics.contextPassed}/${summary.contextMetrics.contextTotal} passed | Avg precision: ${summary.contextMetrics.avgContextPrecision} | Explained: ${summary.contextMetrics.avgExplainedCoverage} | Preview coverage: ${summary.contextMetrics.avgPreviewCoverage}${previewInfo}${primaryInfo}${primaryRecallInfo} | Preview tokens: ${summary.contextMetrics.avgPreviewTokens} | Avg tokens: ${summary.contextMetrics.avgContextTokens}\n`);
+  }
+
+  if (Object.keys(summary.byTaskSize).length > 0) {
+    process.stdout.write('Task size buckets:\n');
+    for (const [bucket, stats] of Object.entries(summary.byTaskSize)) {
+      process.stdout.write(`  ${bucket}: ${stats.count} tasks | P@5=${stats.avgPrecision5} | Recall=${stats.avgRecall} | Lat=${stats.avgLatencyMs}ms | Tokens=${stats.avgTokens}\n`);
+    }
   }
 
   return summary;

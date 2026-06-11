@@ -9,9 +9,11 @@ import { smartReadBatch } from '../src/tools/smart-read-batch.js';
 import { setProjectRoot } from '../src/utils/paths.js';
 import { buildIndex, persistIndex, loadIndex } from '../src/index.js';
 import { countTokens } from '../src/tokenCounter.js';
+import { average, bucketTaskSize, ratio, summarizeTaskSizes } from './kpi-utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
+const RESULTS_DIR = path.resolve(__dirname, 'results');
 
 const SCENARIOS = [
   {
@@ -199,6 +201,7 @@ const runContextScenario = async (scenario, countTokens) => {
   return {
     id: scenario.id,
     type: scenario.type,
+    taskSize: bucketTaskSize(scenario.type),
     latencyMs,
     contextTokens,
     filesReturned,
@@ -224,6 +227,7 @@ const runSearchScenario = async (scenario, countTokens) => {
   return {
     id: scenario.id,
     type: scenario.type,
+    taskSize: bucketTaskSize(scenario.type),
     latencyMs,
     query: scenario.query,
     totalMatches: result.totalMatches,
@@ -282,9 +286,11 @@ const run = async () => {
   const totalContextTokens = contextResults.reduce((sum, r) => sum + (r.contextTokens ?? 0), 0);
   const totalFollowUpTokens = contextResults.reduce((sum, r) => sum + (r.followUpTokens ?? 0), 0);
   const totalFollowUpCalls = contextResults.reduce((sum, r) => sum + (r.followUpReadsNeeded ?? 0), 0);
+  const rereadTasks = contextResults.filter((r) => (r.followUpReadsNeeded ?? 0) > 0).length;
   const avgLatency = Math.round(contextResults.reduce((sum, r) => sum + (r.latencyMs ?? 0), 0) / (contextResults.length || 1));
 
   const summary = {
+    timestamp: new Date().toISOString(),
     scenarios: results.length,
     contextScenarios: contextResults.length,
     selfSufficient: selfSufficientCount,
@@ -296,10 +302,24 @@ const run = async () => {
       ? `${Math.round((totalFollowUpTokens / (totalContextTokens + totalFollowUpTokens)) * 100)}% wasted on follow-ups`
       : '0% wasted — fully self-sufficient',
     avgLatencyMs: avgLatency,
+    rereadTaskRate: ratio(rereadTasks, contextResults.length),
+    rereadCallRate: ratio(totalFollowUpCalls, contextResults.length),
+    byTaskSize: summarizeTaskSizes(results, (subset) => ({
+      avgLatencyMs: Math.round(average(subset, (r) => r.latencyMs ?? 0)),
+      avgTokens: Math.round(average(subset, (r) => r.totalTokens ?? r.matchTokens ?? 0)),
+      selfSufficientRate: ratio(
+        subset.filter((r) => r.selfSufficient === true).length,
+        subset.filter((r) => r.selfSufficient !== undefined).length,
+      ),
+    })),
   };
 
+  fs.mkdirSync(RESULTS_DIR, { recursive: true });
+  const outPath = path.join(RESULTS_DIR, `realworld-eval-${Date.now()}.json`);
+  fs.writeFileSync(outPath, JSON.stringify({ summary, results }, null, 2));
+
   if (jsonMode) {
-    process.stdout.write(JSON.stringify({ summary, results }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ outPath, summary, results }, null, 2) + '\n');
   } else {
     print('=== Summary ===');
     print(`Scenarios: ${summary.scenarios} (${summary.contextScenarios} context + ${results.length - summary.contextScenarios} search)`);
@@ -308,6 +328,9 @@ const run = async () => {
     print(`Follow-up tokens: ${summary.totalFollowUpTokens} (${summary.totalFollowUpCalls} extra calls)`);
     print(`Token efficiency: ${summary.tokenEfficiency}`);
     print(`Avg latency: ${summary.avgLatencyMs}ms`);
+    print(`Reread task rate: ${summary.rereadTaskRate}`);
+    print(`Reread call rate: ${summary.rereadCallRate}`);
+    print(`Results: ${outPath}`);
   }
 };
 

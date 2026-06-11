@@ -1,7 +1,7 @@
 {
   "name": "smart-context-mcp",
   "mcpName": "io.github.Arrayo/smart-context-mcp",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "MCP server that reduces agent token usage by 90% with intelligent context compression, task checkpoint persistence, and workflow-aware agent guidance.",
   "author": "Francisco Caballero Portero <fcp1978@hotmail.com>",
   "type": "module",
@@ -69,8 +69,10 @@
     "eval:context": "node ./evals/harness.js --tool=context",
     "eval:both": "node ./evals/harness.js --tool=both",
     "eval:self": "node ./evals/harness.js --root=../.. --corpus=./evals/corpus/self-tasks.json",
+    "eval:self:json": "node ./evals/harness.js --root=../.. --corpus=./evals/corpus/self-tasks.json --json",
     "eval:realworld": "node ./evals/realworld-eval.js",
     "eval:realworld:json": "node ./evals/realworld-eval.js --json",
+    "eval:kpi:baseline": "node ./evals/kpi-baseline.js",
     "eval:report": "node ./evals/report.js",
     "report:metrics": "node ./scripts/report-metrics.js",
     "report:workflows": "node ./scripts/report-workflow-metrics.js",
@@ -83,5 +85,6 @@
     "js-tiktoken": "^1.0.21",
     "typescript": "^6.0.2",
     "zod": "^4.1.5"
-  }
+  },
+  "packageManager": "pnpm@10.33.3+sha512.a19744364a7e248b92657a4ca5973f9354d21caf982579674b1c539f32c7420c47138ad8b1254df07aba9bc782d9b3029e3db34d5dbff974326eb74dac8ff489"
 }

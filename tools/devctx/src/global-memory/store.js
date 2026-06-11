@@ -6,7 +6,7 @@ import { embed, cosineSimilarity, buildCorpusIdf } from '../embeddings/hashing.j
 
 const DEFAULT_GLOBAL_DIR = path.join(os.homedir(), '.devctx');
 const DEFAULT_GLOBAL_DB = path.join(DEFAULT_GLOBAL_DIR, 'global.db');
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 let sqliteModulePromise = null;
 
@@ -56,6 +56,18 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS idx_entries_kind ON entries(kind);
 CREATE INDEX IF NOT EXISTS idx_entries_project ON entries(project_hash);
 CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS noise_hints (
+  project_hash TEXT NOT NULL,
+  hint_key TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT 'search_noise',
+  hits INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(project_hash, hint_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_noise_hints_project ON noise_hints(project_hash, hits DESC, updated_at DESC);
 `;
 
 const VALID_KINDS = new Set(['decision', 'pattern', 'playbook', 'note']);
@@ -243,6 +255,94 @@ export const listKinds = async ({ filePath = getGlobalDbPath() } = {}) => {
       total: rows.reduce((sum, r) => sum + Number(r.count), 0),
     };
   }, { filePath, readOnly: true });
+};
+
+export const recordNoiseHint = async ({
+  projectPath,
+  hintKey,
+  reason = 'search_noise',
+  filePath = getGlobalDbPath(),
+} = {}) => {
+  if (!projectPath || !hintKey) {
+    return null;
+  }
+
+  const projectHash = hashProjectPath(projectPath);
+  const now = Date.now();
+  return withDb((db) => {
+    db.prepare(`
+      INSERT INTO noise_hints(project_hash, hint_key, reason, hits, created_at, updated_at)
+      VALUES(?, ?, ?, 1, ?, ?)
+      ON CONFLICT(project_hash, hint_key) DO UPDATE SET
+        reason = excluded.reason,
+        hits = noise_hints.hits + 1,
+        updated_at = excluded.updated_at
+    `).run(projectHash, hintKey, reason, now, now);
+
+    const row = db.prepare(`
+      SELECT hits, updated_at
+      FROM noise_hints
+      WHERE project_hash = ? AND hint_key = ?
+    `).get(projectHash, hintKey);
+
+    return {
+      projectHash,
+      hintKey,
+      hits: Number(row?.hits ?? 0),
+      updatedAt: Number(row?.updated_at ?? now),
+    };
+  }, { filePath });
+};
+
+export const getNoiseHints = async ({
+  projectPath,
+  limit = 50,
+  filePath = getGlobalDbPath(),
+} = {}) => {
+  if (!projectPath) {
+    return { hints: [], total: 0 };
+  }
+
+  const projectHash = hashProjectPath(projectPath);
+  return withDb((db) => {
+    if (!db) return { hints: [], total: 0 };
+    const rows = db.prepare(`
+      SELECT hint_key, reason, hits, updated_at
+      FROM noise_hints
+      WHERE project_hash = ?
+      ORDER BY hits DESC, updated_at DESC
+      LIMIT ?
+    `).all(projectHash, limit);
+
+    return {
+      hints: rows.map((row) => ({
+        hintKey: row.hint_key,
+        reason: row.reason,
+        hits: Number(row.hits),
+        penalty: Math.min(Number(row.hits) * 2, 12),
+        updatedAt: Number(row.updated_at),
+      })),
+      total: rows.length,
+    };
+  }, { filePath, readOnly: true });
+};
+
+export const resetNoiseHints = async ({
+  projectPath,
+  hintKey,
+  filePath = getGlobalDbPath(),
+} = {}) => {
+  if (!projectPath) {
+    return { deleted: 0 };
+  }
+
+  const projectHash = hashProjectPath(projectPath);
+  return withDb((db) => {
+    const result = hintKey
+      ? db.prepare('DELETE FROM noise_hints WHERE project_hash = ? AND hint_key = ?').run(projectHash, hintKey)
+      : db.prepare('DELETE FROM noise_hints WHERE project_hash = ?').run(projectHash);
+    return { deleted: Number(result.changes) };
+  }, { filePath });
 };
 
 export const getStats = async ({ filePath = getGlobalDbPath() } = {}) => {

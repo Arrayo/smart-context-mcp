@@ -11,10 +11,12 @@ import { persistMetrics } from '../metrics.js';
 import { runStorageMaintenance } from '../storage/sqlite.js';
 import { PRODUCT_QUALITY_ANALYTICS_KIND } from '../analytics/product-quality.js';
 import { attachSafetyMetadata, buildMutationSafety } from '../utils/mutation-safety.js';
+import { normalizeTokenBudget, peekRemainingBudget } from '../utils/task-budget.js';
 import { smartContext } from './smart-context.js';
 import { smartMetrics } from './smart-metrics.js';
 import { smartSummary } from './smart-summary.js';
 import { deriveStartActions, deriveEndActions } from '../turn/next-actions.js';
+import { isSimpleTask } from '../orchestration/policy/event-policy.js';
 
 const isStorageUnhealthy = (health) =>
   health && health.status !== 'ok' && health.status !== null && health.status !== undefined;
@@ -30,6 +32,7 @@ const DEFAULT_END_MAX_TOKENS = 500;
 const DEFAULT_END_EVENT = 'milestone';
 const DEFAULT_REFRESH_CONTEXT_MAX_TOKENS = 1400;
 const MAX_PROMPT_PREVIEW = 160;
+const SIMPLE_TASK_SKIP_MAX_LENGTH = 40;
 const REFRESHED_CONTEXT_FILE_LIMIT = 3;
 const SAFE_CONTINUITY_STATES = new Set(['aligned', 'resume']);
 const WORKFLOW_END_EVENTS = new Set(['milestone', 'task_complete', 'session_end', 'blocker']);
@@ -178,6 +181,46 @@ const hasMeaningfulPrompt = (prompt) => {
   return normalized.length >= 20 && extractTerms(normalized).length >= 4;
 };
 
+const buildSimpleTaskStartResult = ({ prompt, tokenBudget, verbosity = DEFAULT_VERBOSITY }) => {
+  const normalizedTokenBudget = normalizeTokenBudget(tokenBudget);
+  const recommendedPath = verbosity === 'minimal'
+    ? {
+        phase: 'start',
+        mode: 'simple_task_skip',
+        nextTools: ['smart_read', 'smart_search'],
+        next: 'smart_read: Skip smart_turn for this simple task and use lightweight read/search directly.',
+      }
+    : {
+        phase: 'start',
+        mode: 'simple_task_skip',
+        contextSource: 'direct_prompt',
+        continuityState: 'simple_task_skip',
+        ensureSessionRecommended: false,
+        autoCreated: false,
+        isolatedSession: false,
+        nextTools: ['smart_read', 'smart_search'],
+        nextActions: deriveStartActions({ prompt, mode: 'simple_task_skip', refreshedContext: null, summaryResult: null }),
+        next: 'smart_read: Skip smart_turn for this simple task and use lightweight read/search directly.',
+        instructions: 'smart_read: Skip smart_turn for this simple task and use lightweight read/search directly. | smart_search: Use only if the task grows beyond a single targeted read.',
+      };
+
+  return {
+    phase: 'start',
+    skipSmartTurn: true,
+    continuity: {
+      state: 'simple_task_skip',
+      shouldReuseContext: false,
+      reason: 'Simple task heuristic skipped persisted continuity setup to avoid overhead.',
+    },
+    ...(normalizedTokenBudget ? {
+      taskBudget: normalizedTokenBudget,
+      remainingBudget: peekRemainingBudget({ tokenBudget: normalizedTokenBudget }),
+    } : {}),
+    recommendedPath,
+    message: 'Simple task heuristic skipped smart_turn(start); use lightweight read/search flow unless the task grows.',
+  };
+};
+
 const buildAutoCreateUpdate = (prompt) => ({
   goal: truncate(prompt, 120),
   status: 'planning',
@@ -252,6 +295,28 @@ const shouldRefreshContext = ({ prompt, ensureSession, summaryResult, continuity
     || (ensureSession && (summaryResult?.ambiguous || !summaryResult?.found))
     || ['possible_shift', 'context_mismatch'].includes(continuity?.state)
   );
+
+const shouldIncludeSummaryInMinimal = ({ continuity, summaryResult, mutationSafety, autoCreated }) =>
+  Boolean(mutationSafety?.blocked)
+  || Boolean(summaryResult?.ambiguous)
+  || Boolean(autoCreated)
+  || ['possible_shift', 'context_mismatch'].includes(continuity?.state);
+
+const shouldIncludeRefreshedContextInMinimal = ({ continuity, summaryResult, mutationSafety, refreshedContext }) =>
+  Boolean(mutationSafety?.blocked)
+  || Boolean(summaryResult?.ambiguous)
+  || ['possible_shift', 'context_mismatch'].includes(continuity?.state)
+  || Number(refreshedContext?.topFiles?.length ?? 0) > 0;
+
+const compactSummaryForMinimal = (summary) => {
+  if (!summary) return null;
+  return {
+    ...(summary.status ? { status: summary.status } : {}),
+    ...(summary.goal ? { goal: summary.goal } : {}),
+    ...(summary.currentFocus ? { currentFocus: summary.currentFocus } : {}),
+    ...(summary.nextStep ? { nextStep: summary.nextStep } : {}),
+  };
+};
 
 const buildStartRecommendedPath = ({
   prompt,
@@ -444,6 +509,7 @@ const startTurn = async ({
   taskId,
   prompt,
   maxTokens = DEFAULT_START_MAX_TOKENS,
+  tokenBudget,
   ensureSession = false,
   includeMetrics = false,
   metricsWindow = '7d',
@@ -451,6 +517,11 @@ const startTurn = async ({
   verbosity = DEFAULT_VERBOSITY,
 } = {}) => {
   const startTime = Date.now();
+  const normalizedTokenBudget = normalizeTokenBudget(tokenBudget);
+
+  if (!sessionId && !taskId && isSimpleTask(prompt) && normalizeWhitespace(prompt).length <= SIMPLE_TASK_SKIP_MAX_LENGTH) {
+    return buildSimpleTaskStartResult({ prompt, tokenBudget: normalizedTokenBudget, verbosity });
+  }
 
   if (process.env.DEVCTX_DISABLE_BACKGROUND_TASKS !== 'true') {
     triggerBackgroundIndexBuild({ root: projectRoot }).catch(() => {});
@@ -602,6 +673,8 @@ const startTurn = async ({
   const compactTask = summaryResult.task && minimal
     ? { taskId: summaryResult.task.taskId, status: summaryResult.task.status }
     : summaryResult.task ?? null;
+  const includeSummary = !minimal || shouldIncludeSummaryInMinimal({ continuity, summaryResult, mutationSafety, autoCreated });
+  const includeRefreshedContext = !minimal || shouldIncludeRefreshedContextInMinimal({ continuity, summaryResult, mutationSafety, refreshedContext });
   const includeMessage = !minimal || mutationSafety?.blocked;
 
   return attachSafetyMetadata({
@@ -613,8 +686,8 @@ const startTurn = async ({
     ...(minimal ? {} : { promptPreview: truncate(prompt, MAX_PROMPT_PREVIEW) }),
     ...(previousSessionId ? { previousSessionId } : {}),
     continuity: compactContinuity,
-    ...(summaryResult.summary ? { summary: summaryResult.summary } : {}),
-    ...(refreshedContext ? { refreshedContext } : {}),
+    ...(includeSummary && summaryResult.summary ? { summary: minimal ? compactSummaryForMinimal(summaryResult.summary) : summaryResult.summary } : {}),
+    ...(includeRefreshedContext && refreshedContext ? { refreshedContext } : {}),
     ...(workflow ? { workflow } : {}),
     ...(!minimal && summaryResult.candidates ? { candidates: summaryResult.candidates } : {}),
     ...(summaryResult.ambiguous && summaryResult.recommendedSessionId ? { recommendedSessionId: summaryResult.recommendedSessionId } : {}),
@@ -631,6 +704,10 @@ const startTurn = async ({
           : autoCreated
             ? 'Created a new persisted session for this task prompt.'
             : continuity.reason,
+    } : {}),
+    ...(normalizedTokenBudget ? {
+      taskBudget: normalizedTokenBudget,
+      remainingBudget: peekRemainingBudget({ tokenBudget: normalizedTokenBudget }),
     } : {}),
   }, {
     repoSafety: summaryResult.repoSafety ?? metrics?.repoSafety ?? null,
@@ -649,12 +726,14 @@ const endTurn = async ({
   update = {},
   force = false,
   maxTokens = DEFAULT_END_MAX_TOKENS,
+  tokenBudget,
   includeMetrics = false,
   metricsWindow = '7d',
   latestMetrics = 5,
   verbosity = DEFAULT_VERBOSITY,
 } = {}) => {
   const startTime = Date.now();
+  const normalizedTokenBudget = normalizeTokenBudget(tokenBudget);
   const checkpoint = await smartSummary({
     action: 'checkpoint',
     sessionId,
@@ -741,8 +820,6 @@ const endTurn = async ({
     ? {
         skipped: Boolean(checkpoint.skipped),
         ...(checkpoint.blocked !== undefined ? { blocked: checkpoint.blocked } : {}),
-        ...(checkpoint.summary ? { summary: checkpoint.summary } : {}),
-        ...(checkpoint.tokens !== undefined ? { tokens: checkpoint.tokens } : {}),
         ...(checkpoint.checkpoint ? {
           checkpoint: {
             event: checkpoint.checkpoint.event,
@@ -762,6 +839,10 @@ const endTurn = async ({
     ...(workflow ? { workflow } : {}),
     ...(metrics ? { metrics: summarizeMetrics(metrics) } : {}),
     ...(isStorageUnhealthy(checkpoint.storageHealth ?? metrics?.storageHealth) ? { storageHealth: checkpoint.storageHealth ?? metrics?.storageHealth } : {}),
+    ...(normalizedTokenBudget ? {
+      taskBudget: normalizedTokenBudget,
+      remainingBudget: peekRemainingBudget({ tokenBudget: normalizedTokenBudget }),
+    } : {}),
     recommendedPath,
     ...(includeMessage ? { message: mutationSafety?.blocked ? mutationSafety.message : checkpoint.message } : {}),
   }, {
@@ -783,6 +864,7 @@ export const smartTurn = async ({
   event,
   force,
   maxTokens,
+  tokenBudget,
   ensureSession = false,
   includeMetrics = false,
   metricsWindow = '7d',
@@ -797,6 +879,7 @@ export const smartTurn = async ({
       taskId,
       prompt,
       maxTokens,
+      tokenBudget,
       ensureSession,
       includeMetrics,
       metricsWindow,
@@ -813,6 +896,7 @@ export const smartTurn = async ({
       update,
       force,
       maxTokens,
+      tokenBudget,
       includeMetrics,
       metricsWindow,
       latestMetrics,

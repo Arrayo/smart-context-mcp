@@ -15,6 +15,9 @@ import {
   deleteEntry,
   listKinds,
   getStats,
+  recordNoiseHint,
+  getNoiseHints,
+  resetNoiseHints,
   isGlobalMemoryEnabled,
 } from '../src/global-memory/store.js';
 import { globalMemory } from '../src/tools/global-memory.js';
@@ -146,6 +149,22 @@ describe('global-memory :: store CRUD', { skip: SKIP_SQLITE_TESTS }, () => {
     assert.equal(stats.byKind.decision, 2);
     assert.equal(stats.byKind.pattern, 1);
   });
+
+  it('records, lists, and resets repo noise hints', async () => {
+    await recordNoiseHint({ projectPath: '/projects/demo', hintKey: 'src/index.js', reason: 'semantic_dedupe' });
+    await recordNoiseHint({ projectPath: '/projects/demo', hintKey: 'src/index.js', reason: 'semantic_dedupe' });
+
+    const listed = await getNoiseHints({ projectPath: '/projects/demo' });
+    assert.equal(listed.hints.length, 1);
+    assert.equal(listed.hints[0].hintKey, 'src/index.js');
+    assert.equal(listed.hints[0].hits, 2);
+    assert.ok(listed.hints[0].penalty > 0);
+
+    const reset = await resetNoiseHints({ projectPath: '/projects/demo', hintKey: 'src/index.js' });
+    assert.equal(reset.deleted, 1);
+    const after = await getNoiseHints({ projectPath: '/projects/demo' });
+    assert.equal(after.hints.length, 0);
+  });
 });
 
 describe('global-memory :: tool surface', { skip: SKIP_SQLITE_TESTS }, () => {
@@ -202,5 +221,18 @@ describe('global-memory :: tool surface', { skip: SKIP_SQLITE_TESTS }, () => {
     const r = await globalMemory({ action: 'destroy_universe' });
     assert.equal(r.success, false);
     assert.match(r.error, /Invalid action/);
+  });
+
+  it('supports noise_stats and noise_reset actions', async () => {
+    process.env.DEVCTX_GLOBAL_MEMORY = 'true';
+    await recordNoiseHint({ projectPath: path.resolve('.'), hintKey: 'src/index.js' });
+
+    const stats = await globalMemory({ action: 'noise_stats' });
+    assert.equal(stats.success, true);
+    assert.ok(Array.isArray(stats.hints));
+
+    const reset = await globalMemory({ action: 'noise_reset', query: 'src/index.js' });
+    assert.equal(reset.success, true);
+    assert.ok(reset.deleted >= 1);
   });
 });

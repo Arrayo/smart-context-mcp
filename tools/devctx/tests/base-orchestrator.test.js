@@ -126,6 +126,26 @@ test('resolveManagedStart calls smartTurn when no preparedStartResult', { skip: 
   assert.equal(result.startResult.sessionId, 'auto-created-session');
 });
 
+test('resolveManagedStart skips smartTurn entirely for simple tasks on fast path', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
+  let startTurnCalled = false;
+  const mockStartTurn = async () => {
+    startTurnCalled = true;
+    return {};
+  };
+
+  const result = await resolveManagedStart({
+    prompt: 'fix import',
+    ensureSession: true,
+    allowIsolation: false,
+    startTurn: mockStartTurn,
+  });
+
+  assert.equal(startTurnCalled, false);
+  assert.equal(result.fastPath, true);
+  assert.equal(result.startResult.skipSmartTurn, true);
+  assert.equal(result.startResult.recommendedPath?.mode, 'simple_task_skip');
+});
+
 test('resolveManagedStart isolates session when allowIsolation=true and continuity is unsafe', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
   await smartSummary({
     action: 'update',

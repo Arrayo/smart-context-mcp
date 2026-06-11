@@ -1,10 +1,11 @@
 import { smartRead } from './smart-read.js';
 import { countTokens } from '../tokenCounter.js';
 
-export const smartReadBatch = async ({ files, maxTokens }) => {
+export const smartReadBatch = async ({ files, maxTokens, tokenBudget }) => {
   const results = [];
   let totalTokens = 0;
   let filesSkipped = 0;
+  let budgetStoppedAt = null;
 
   for (const item of files) {
     try {
@@ -15,6 +16,7 @@ export const smartReadBatch = async ({ files, maxTokens }) => {
         startLine: item.startLine,
         endLine: item.endLine,
         maxTokens: item.maxTokens,
+        tokenBudget,
       });
 
       if (readResult.error) {
@@ -30,6 +32,7 @@ export const smartReadBatch = async ({ files, maxTokens }) => {
 
       if (maxTokens && totalTokens + itemTokens > maxTokens && results.length > 0) {
         filesSkipped = files.length - results.length;
+        budgetStoppedAt = item.path;
         break;
       }
 
@@ -40,7 +43,8 @@ export const smartReadBatch = async ({ files, maxTokens }) => {
         truncated: readResult.truncated,
         content: readResult.content,
         ...(readResult.indexHint !== undefined ? { indexHint: readResult.indexHint } : {}),
-        ...(readResult.chosenMode ? { chosenMode: readResult.chosenMode, budgetApplied: true } : {}),
+        ...(readResult.chosenMode ? { chosenMode: readResult.chosenMode } : {}),
+        ...(readResult.budgetApplied ? { budgetApplied: true, budgetDetails: readResult.budgetDetails } : {}),
       });
 
       totalTokens += itemTokens;
@@ -53,7 +57,7 @@ export const smartReadBatch = async ({ files, maxTokens }) => {
     }
   }
 
-  return {
+  const response = {
     results,
     metrics: {
       totalTokens,
@@ -61,4 +65,23 @@ export const smartReadBatch = async ({ files, maxTokens }) => {
       filesSkipped,
     },
   };
+
+  if (maxTokens && filesSkipped > 0) {
+    response.budgetApplied = true;
+    response.budgetDetails = {
+      scope: 'batch',
+      maxTokens,
+      actions: ['batch_stopped_early'],
+      filesRead: results.length,
+      filesSkipped,
+      stopReason: 'batch_token_limit',
+      ...(budgetStoppedAt ? { stoppedBefore: budgetStoppedAt } : {}),
+    };
+  }
+
+  if (tokenBudget) {
+    response.taskBudget = tokenBudget;
+  }
+
+  return response;
 };

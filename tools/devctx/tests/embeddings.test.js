@@ -182,10 +182,39 @@ describe('smart_search :: semantic opt-in', () => {
     assert.equal(result.semantic.embedder, 'hashing-v1');
     assert.ok(Array.isArray(result.semantic.symbols));
     assert.ok(Array.isArray(result.semantic.files));
+    assert.equal(result.mode, 'semantic');
+    if (result.semantic.symbols.length > 0) {
+      assert.equal(result.semantic.symbols[0].matchedBy, 'semantic');
+      assert.match(result.semantic.symbols[0].whyRanked, /semantic similarity/);
+    }
+  });
+
+  it('returns semantic block when mode=semantic and exact signal is weak', async () => {
+    const result = await smartSearch({ query: 'user registration', cwd: tmp, mode: 'semantic', semanticLimit: 3 });
+    assert.equal(result.mode, 'semantic');
+    assert.ok(result.semantic, 'expected semantic block for semantic mode');
+  });
+
+  it('needle mode skips term expansion for conceptual multi-word queries', async () => {
+    const result = await smartSearch({ query: 'register new user', cwd: tmp, mode: 'needle' });
+    assert.equal(result.mode, 'needle');
+    assert.equal(result.totalMatches, 0);
+    assert.equal(result.semantic, undefined);
+    assert.ok(Array.isArray(result.suggestions));
+    assert.ok(result.suggestions.some((item) => item.includes('mode="balanced"')));
+    assert.ok(result.suggestions.some((item) => item.includes('mode="semantic"')));
+    assert.match(result.matches, /Suggestions:/);
+  });
+
+  it('balanced mode preserves term expansion behavior by default', async () => {
+    const result = await smartSearch({ query: 'register new user', cwd: tmp });
+    assert.equal(result.mode, 'balanced');
+    assert.ok(result.totalMatches > 0, 'expected default balanced mode to recover term matches');
   });
 
   it('does NOT include semantic block by default', async () => {
     const result = await smartSearch({ query: 'register', cwd: tmp });
+    assert.equal(result.mode, 'balanced');
     assert.equal(result.semantic, undefined);
   });
 });

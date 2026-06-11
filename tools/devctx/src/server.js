@@ -129,7 +129,7 @@ export const createDevctxServer = () => {
 
   server.tool(
     'smart_read',
-    'Read a file with token-efficient modes. ALWAYS prefer outline/signatures/symbol/explain over full. Reading cascade: outline → signatures → symbol → explain → range → full (last resort). Mode guide: outline (~90% savings): file structure, exports, top-level symbols — use first for orientation. signatures (~85% savings): function signatures with parameters and return types — use when you need the API surface. symbol: extract specific functions/classes by name (string or array) — use when you know what to read; add context=true for callers, tests, and dependencies. explain (~95% savings): one-shot compact summary of a symbol (signature, docstring, first body line, side effects, caller count). Cached in SQLite by content hash — second call is free. Requires symbol. range: specific line range — use only when you need exact lines. full: raw content, no savings — only for config/lock files. maxTokens: token budget — auto-cascades to fit (outline → signatures → truncated). Supports JS/TS, Python, Go, Rust, Java, C#, Kotlin, PHP, Swift, shell, Terraform, Dockerfile, SQL, JSON, TOML, YAML.',
+    'Read a file with token-efficient modes. ALWAYS prefer outline/signatures/symbol/explain over full. Reading cascade: outline → signatures → symbol → explain → range → full (last resort). Mode guide: outline (~90% savings): file structure, exports, top-level symbols — use first for orientation. signatures (~85% savings): function signatures with parameters and return types — use when you need the API surface. symbol: extract specific functions/classes by name (string or array) — use when you know what to read; add context=true for callers, tests, and dependencies. explain (~95% savings): one-shot compact summary of a symbol (signature, docstring, first body line, side effects, caller count). Cached in SQLite by content hash — second call is free. Requires symbol. range: specific line range — use only when you need exact lines. full: raw content, no savings — explicit last resort; with a token budget it degrades to lighter modes first and reports `fullMode` metadata explaining whether full was actually used. maxTokens: token budget — auto-degrades to lighter modes before truncation; when the budget changes the result, `budgetDetails` reports the final mode, truncation actions, and marks `scope="content"`. Supports JS/TS, Python, Go, Rust, Java, C#, Kotlin, PHP, Swift, shell, Terraform, Dockerfile, SQL, JSON, TOML, YAML.',
     {
       filePath: z.string(),
       mode: z.enum(['full', 'outline', 'signatures', 'range', 'symbol', 'explain']).optional(),
@@ -137,15 +137,23 @@ export const createDevctxServer = () => {
       endLine: z.number().optional(),
       symbol: z.union([z.string(), z.array(z.string())]).optional(),
       maxTokens: z.number().int().min(1).optional(),
+      tokenBudget: z.union([
+        z.number().int().min(1),
+        z.object({
+          id: z.string().optional(),
+          maxTokens: z.number().int().min(1),
+          shared: z.boolean().optional(),
+        }),
+      ]).optional(),
       context: z.boolean().optional(),
     },
-    async ({ filePath, mode = 'outline', startLine, endLine, symbol, maxTokens, context }) =>
-      asTextResult(await smartRead({ filePath, mode, startLine, endLine, symbol, maxTokens, context })),
+    async ({ filePath, mode = 'outline', startLine, endLine, symbol, maxTokens, tokenBudget, context }) =>
+      asTextResult(await smartRead({ filePath, mode, startLine, endLine, symbol, maxTokens, tokenBudget, context })),
   );
 
   server.tool(
     'smart_read_batch',
-    'Read multiple files in one call. Each item accepts path, mode (prefer outline/signatures/symbol/explain — full saves 0 tokens), symbol, startLine, endLine, maxTokens (per-file budget). Optional global maxTokens budget with early stop when exceeded. Max 20 files per call.',
+    'Read multiple files in one call. Each item accepts path, mode (prefer outline/signatures/symbol/explain — full saves 0 tokens), symbol, startLine, endLine, maxTokens (per-file budget). Optional global maxTokens budget with early stop when exceeded; when that happens, `budgetDetails` reports the batch-level stop point, marks `scope="batch"`, and includes `actions`. Max 20 files per call.',
     {
       files: z.array(z.object({
         path: z.string(),
@@ -156,25 +164,35 @@ export const createDevctxServer = () => {
         maxTokens: z.number().int().min(1).optional(),
       })).min(1).max(20),
       maxTokens: z.number().int().min(1).optional(),
+      tokenBudget: z.union([
+        z.number().int().min(1),
+        z.object({
+          id: z.string().optional(),
+          maxTokens: z.number().int().min(1),
+          shared: z.boolean().optional(),
+        }),
+      ]).optional(),
     },
-    async ({ files, maxTokens }) =>
-      asTextResult(await smartReadBatch({ files, maxTokens })),
+    async ({ files, maxTokens, tokenBudget }) =>
+      asTextResult(await smartReadBatch({ files, maxTokens, tokenBudget })),
   );
 
   server.tool(
     'smart_search',
-    'Search code with ranked, deduplicated results and index boosting. Best for: finding where a symbol is defined/used, understanding call chains, locating implementations. NOT ideal for: exact string matching (use Grep), finding files by name (use Glob), broad multi-word queries (generates noise). Optional intent adjusts ranking. maxFiles caps the number of files returned (default 15). kinds filters results by symbol kind from the index — e.g. ["adr","adr-section"] returns only architecture decision docs; ["class","function"] returns only those declarations; use to scope a query to a domain. Pass semantic=true to additionally include a local semantic re-rank (hashing-v1 embedder, TF-IDF over symbol signatures + file paths) — useful when the query is conceptual ("user registration flow", "rate limit middleware") rather than literal. semanticLimit caps the semantic block (default 8). Semantic block adds zero deps and runs in <5ms even on large indexes. When >30 files match, results include a hint suggesting Grep instead.',
+    'Search code with ranked, deduplicated results and index boosting. Best for: finding where a symbol is defined/used, understanding call chains, locating implementations. NOT ideal for: exact string matching (use Grep), finding files by name (use Glob), broad multi-word queries (generates noise). Optional intent adjusts ranking. `mode` controls search strategy: `needle` = exact literal only (no regex or term expansion), `balanced` = exact + regex + term expansion (default), `semantic` = exact-first plus a local semantic block only when exact signal is weak. maxFiles caps the number of files returned (default 5). maxTokens caps the overall response payload: `matches` is truncated first, then optional diagnostics and semantic blocks are compacted or omitted if needed. When budgeting happens, `budgetDetails` reports `actions`, which sections were compacted, and marks `scope="response"`. kinds filters results by symbol kind from the index — e.g. ["adr","adr-section"] returns only architecture decision docs; ["class","function"] returns only those declarations; use to scope a query to a domain. `semantic=true` remains supported as a legacy alias for `mode="semantic"`. semanticLimit caps the semantic block (default 8). Top ranked files include `matchedBy`, `boostSource`, `scoreBreakdown`, and `whyRanked` so ranking decisions are inspectable. Semantic block adds zero deps and runs in <5ms even on large indexes. When more files exist beyond the initial window, the response includes `hasMore`, `totalFiles`, and `nextSuggestedMaxFiles` to support expansion on demand. When the search is too broad or returns nothing useful, the response also includes actionable `suggestions` for refining the query, mode, or kinds.',
     {
       query: z.string(),
       cwd: z.string().optional(),
       intent: z.enum(['implementation', 'debug', 'tests', 'config', 'docs', 'explore']).optional(),
       maxFiles: z.number().int().min(1).max(50).optional(),
+      maxTokens: z.number().int().min(1).optional(),
       kinds: z.array(z.string()).optional(),
+      mode: z.enum(['needle', 'balanced', 'semantic']).optional(),
       semantic: z.boolean().optional(),
       semanticLimit: z.number().int().min(1).max(50).optional(),
     },
-    async ({ query, cwd = '.', intent, maxFiles, kinds, semantic, semanticLimit }) =>
-      asTextResult(await smartSearch({ query, cwd, intent, maxFiles, kinds, semantic, semanticLimit })),
+    async ({ query, cwd = '.', intent, maxFiles, maxTokens, kinds, mode, semantic, semanticLimit }) =>
+      asTextResult(await smartSearch({ query, cwd, intent, maxFiles, maxTokens, kinds, mode, semantic, semanticLimit })),
   );
 
   server.tool(
@@ -184,6 +202,14 @@ export const createDevctxServer = () => {
       task: z.string().optional(),
       intent: z.enum(['implementation', 'debug', 'tests', 'config', 'docs', 'explore']).optional(),
       maxTokens: z.number().optional(),
+      tokenBudget: z.union([
+        z.number().int().min(1),
+        z.object({
+          id: z.string().optional(),
+          maxTokens: z.number().int().min(1),
+          shared: z.boolean().optional(),
+        }),
+      ]).optional(),
       entryFile: z.string().optional(),
       diff: z.union([z.boolean(), z.string()]).optional(),
       detail: z.enum(['minimal', 'balanced', 'deep']).optional(),
@@ -196,8 +222,8 @@ export const createDevctxServer = () => {
       pathMaxHops: z.number().int().min(1).max(10).optional(),
       pathDirected: z.boolean().optional(),
     },
-    async ({ task, intent, maxTokens, entryFile, diff, detail, include, prefetch, paths, pathMaxHops, pathDirected }) =>
-      asTextResult(await smartContext({ task, intent, maxTokens, entryFile, diff, detail, include, prefetch, paths, pathMaxHops, pathDirected })),
+    async ({ task, intent, maxTokens, tokenBudget, entryFile, diff, detail, include, prefetch, paths, pathMaxHops, pathDirected }) =>
+      asTextResult(await smartContext({ task, intent, maxTokens, tokenBudget, entryFile, diff, detail, include, prefetch, paths, pathMaxHops, pathDirected })),
   );
 
   server.tool(
@@ -256,9 +282,9 @@ export const createDevctxServer = () => {
 
   server.tool(
     'global_memory',
-    'Opt-in cross-project memory persisted to ~/.devctx/global.db (override with DEVCTX_GLOBAL_DB). Enable via DEVCTX_GLOBAL_MEMORY=true. Stores canonical decisions, recurring patterns, playbook drafts, and notes across projects so an agent can carry insights between repos without re-deriving them. Content is scrubbed for likely secrets/JWTs/API keys/emails/home paths before being persisted. Project paths are stored hashed (FNV-1a) instead of raw. Actions: save (kind+content+tags?), recall (kind?+query?+limit? — uses local hashing/TF-IDF embedder for ranking, zero deps), list (counts per kind), delete (id), mark_used (id), stats (db size + per-kind totals). Valid kinds: decision, pattern, playbook, note. projectScope=true (default) hashes the current project so recall can be filtered per-project; set false for repo-agnostic access.',
+    'Opt-in cross-project memory persisted to ~/.devctx/global.db (override with DEVCTX_GLOBAL_DB). Enable via DEVCTX_GLOBAL_MEMORY=true. Stores canonical decisions, recurring patterns, playbook drafts, notes, and repo-local noise hints so an agent can carry insights between repos without re-deriving them. Content is scrubbed for likely secrets/JWTs/API keys/emails/home paths before being persisted. Project paths are stored hashed (FNV-1a) instead of raw. Actions: save (kind+content+tags?), recall (kind?+query?+limit? — uses local hashing/TF-IDF embedder for ranking, zero deps), list (counts per kind), delete (id), mark_used (id), stats (db size + per-kind totals), noise_stats (inspect repo noise hints), noise_reset (reset repo noise hints or one hint via query). Valid kinds: decision, pattern, playbook, note. projectScope=true (default) hashes the current project so recall can be filtered per-project; set false for repo-agnostic access.',
     {
-      action: z.enum(['save', 'recall', 'list', 'delete', 'stats', 'mark_used']),
+      action: z.enum(['save', 'recall', 'list', 'delete', 'stats', 'mark_used', 'noise_stats', 'noise_reset']),
       kind: z.enum(['decision', 'pattern', 'playbook', 'note']).optional(),
       content: z.string().optional(),
       tags: z.array(z.string()).optional(),
@@ -582,13 +608,21 @@ export const createDevctxServer = () => {
       event: z.enum(['manual', 'milestone', 'decision', 'blocker', 'status_change', 'file_change', 'task_switch', 'task_complete', 'session_end', 'read_only', 'heartbeat']).optional(),
       force: z.boolean().optional(),
       maxTokens: z.number().int().min(100).max(2000).optional(),
+      tokenBudget: z.union([
+        z.number().int().min(1),
+        z.object({
+          id: z.string().optional(),
+          maxTokens: z.number().int().min(1),
+          shared: z.boolean().optional(),
+        }),
+      ]).optional(),
       ensureSession: z.boolean().optional(),
       includeMetrics: z.boolean().optional(),
       metricsWindow: z.enum(['24h', '7d', '30d', 'all']).optional(),
       latestMetrics: z.number().int().min(1).max(20).optional(),
       verbosity: z.enum(['minimal', 'standard', 'full']).optional().describe('Default "minimal" — returns compact recommendedPath/continuity/task. Use "standard" or "full" only when you need long instructions, candidates, or full checkpoint diagnostics.'),
     },
-    async ({ phase, sessionId, prompt, update, event, force, maxTokens, ensureSession, includeMetrics, metricsWindow, latestMetrics, verbosity }) =>
+    async ({ phase, sessionId, prompt, update, event, force, maxTokens, tokenBudget, ensureSession, includeMetrics, metricsWindow, latestMetrics, verbosity }) =>
       asTextResult(await smartTurn({
         phase,
         sessionId,
@@ -597,6 +631,7 @@ export const createDevctxServer = () => {
         event,
         force,
         maxTokens,
+        tokenBudget,
         ensureSession,
         includeMetrics,
         metricsWindow,
@@ -613,15 +648,24 @@ export const createDevctxServer = () => {
       sessionId: z.string().optional(),
       taskId: z.string().optional(),
       maxTokens: z.number().int().min(100).max(2000).optional(),
+      tokenBudget: z.union([
+        z.number().int().min(1),
+        z.object({
+          id: z.string().optional(),
+          maxTokens: z.number().int().min(1),
+          shared: z.boolean().optional(),
+        }),
+      ]).optional(),
       verbosity: z.enum(['minimal', 'standard', 'full']).optional(),
     },
-    async ({ prompt, sessionId, taskId, maxTokens, verbosity }) =>
+    async ({ prompt, sessionId, taskId, maxTokens, tokenBudget, verbosity }) =>
       asTextResult(await smartTurn({
         phase: 'start',
         prompt,
         sessionId,
         taskId,
         maxTokens,
+        tokenBudget,
         ensureSession: true,
         verbosity: verbosity ?? 'minimal',
       })),

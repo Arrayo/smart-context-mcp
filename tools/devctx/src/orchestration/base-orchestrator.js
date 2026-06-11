@@ -16,6 +16,7 @@ import {
 export const DEFAULT_ORCHESTRATION_EVENT = 'session_end';
 export const DEFAULT_START_MAX_TOKENS = 350;
 export const DEFAULT_END_MAX_TOKENS = 350;
+const SIMPLE_TASK_SKIP_MAX_LENGTH = 40;
 
 const buildContextLines = (startResult) => {
   const context = buildOperationalContextLines(startResult, {
@@ -53,11 +54,31 @@ const buildFreshSessionUpdate = (prompt) => {
   };
 };
 
+const buildSimpleTaskStartResult = (prompt) => ({
+  phase: 'start',
+  skipSmartTurn: true,
+  continuity: {
+    state: 'simple_task_skip',
+    shouldReuseContext: false,
+    reason: 'Simple task heuristic skipped persisted continuity setup to avoid overhead.',
+  },
+  recommendedPath: {
+    phase: 'start',
+    mode: 'simple_task_skip',
+    nextTools: ['smart_read', 'smart_search'],
+    nextActions: [],
+    next: 'smart_read: Skip smart_turn for this simple task and use lightweight read/search directly.',
+  },
+  message: 'Simple task heuristic skipped smart_turn(start); use lightweight read/search flow unless the task grows.',
+  ...(prompt ? { promptPreview: truncate(prompt, MAX_FOCUS_LENGTH) } : {}),
+});
+
 const ensureIsolatedSession = async ({
   prompt,
   sessionId,
   startResult,
   startMaxTokens = DEFAULT_START_MAX_TOKENS,
+  tokenBudget,
   summaryTool = smartSummary,
   startTurn = smartTurn,
 }) => {
@@ -96,6 +117,7 @@ const ensureIsolatedSession = async ({
     prompt,
     ensureSession: false,
     maxTokens: startMaxTokens,
+    tokenBudget,
   });
 
   return {
@@ -112,11 +134,23 @@ export const resolveManagedStart = async ({
   ensureSession = true,
   allowIsolation = false,
   startMaxTokens = DEFAULT_START_MAX_TOKENS,
+  tokenBudget,
   startTurn = smartTurn,
   summaryTool = smartSummary,
   enableFastPath = true,
 }) => {
-  const simpleTask = enableFastPath && isSimpleTask(prompt);
+  const simpleTask = enableFastPath && isSimpleTask(prompt) && normalizeWhitespace(prompt).length <= SIMPLE_TASK_SKIP_MAX_LENGTH;
+
+  if (simpleTask && !preparedStartResult && !sessionId) {
+    const startResult = buildSimpleTaskStartResult(prompt);
+    return {
+      startResult,
+      isolated: false,
+      previousSessionId: null,
+      autoStarted: false,
+      fastPath: true,
+    };
+  }
 
   const startResult = preparedStartResult ?? await startTurn({
     phase: 'start',
@@ -124,6 +158,7 @@ export const resolveManagedStart = async ({
     prompt,
     ensureSession: simpleTask ? false : ensureSession,
     maxTokens: startMaxTokens,
+    tokenBudget,
   });
 
   if (!allowIsolation || simpleTask) {
@@ -141,6 +176,7 @@ export const resolveManagedStart = async ({
     sessionId,
     startResult,
     startMaxTokens,
+    tokenBudget,
     summaryTool,
     startTurn,
   });

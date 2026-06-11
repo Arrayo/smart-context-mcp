@@ -11,8 +11,11 @@ import { smartShell } from '../src/tools/smart-shell.js';
 import { smartSearch, isSmartCaseSensitive, walk, searchWithFallback, intentWeights, VALID_INTENTS } from '../src/tools/smart-search.js';
 import { buildIndex, buildIndexIncremental, removeFileFromIndex, queryIndex, queryRelated, isTestFile, isFileStale, reindexFile, persistIndex, loadIndex, getGraphCoverage } from '../src/index.js';
 import { smartRead, clearReadCache, buildSymbolContext, grepSymbolInFile, extractTypeReferences } from '../src/tools/smart-read.js';
+import { smartSummary } from '../src/tools/smart-summary.js';
 import { countTokens } from '../src/tokenCounter.js';
 import { setProjectRoot } from '../src/utils/paths.js';
+import { clearTaskBudgets } from '../src/utils/task-budget.js';
+import { recordNoiseHint } from '../src/global-memory/store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -843,20 +846,149 @@ describe('devctx-init agent rules', () => {
 // ---------------------------------------------------------------------------
 
 describe('smart_search ranking', () => {
+  const testsRoot = __dirname;
+  const srcRoot = path.resolve(__dirname, '..', 'src');
+  const formatsRoot = path.resolve(__dirname, '..', 'fixtures', 'formats');
+
   it('applies test penalty to test files', async () => {
-    const result = await smartSearch({ query: 'assert', cwd: 'tools/devctx/tests' });
+    const result = await smartSearch({ query: 'assert', cwd: testsRoot, _testIgnoreSessionSignals: true });
     assert.ok(result.topFiles.length > 0, 'should have test matches');
     for (const f of result.topFiles) {
       assert.ok(f.score < 100, `test file score (${f.score}) should be penalized`);
     }
   });
 
+  it('exposes ranking explanation fields on top results', async () => {
+    const result = await smartSearch({ query: 'smartSearch', cwd: srcRoot });
+    assert.ok(result.topFiles.length > 0);
+    const top = result.topFiles[0];
+    assert.ok(['text', 'index', 'graph'].includes(top.matchedBy));
+    assert.ok(['text', 'index', 'graph'].includes(top.boostSource));
+    assert.ok(typeof top.whyRanked === 'string' && top.whyRanked.length > 0);
+    assert.ok(typeof top.scoreBreakdown === 'object' && top.scoreBreakdown !== null);
+    assert.ok(typeof top.scoreBreakdown.finalScore === 'number');
+    assert.equal(top.scoreBreakdown.finalScore, top.score);
+  });
+
   it('does not double-boost Dockerfiles', async () => {
-    const result = await smartSearch({ query: 'node', cwd: 'tools/devctx/fixtures/formats' });
+    const result = await smartSearch({ query: 'node', cwd: formatsRoot });
     const dockerFile = result.topFiles.find((f) => f.file.toLowerCase().includes('dockerfile'));
     if (dockerFile) {
       assert.ok(dockerFile.score < 100, `Dockerfile score (${dockerFile.score}) should not be inflated`);
     }
+  });
+
+  it('demotes barrel reexports below the implementation they mirror', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-search-barrel-'));
+    const savedRoot = (await import('../src/utils/paths.js')).projectRoot;
+
+    try {
+      setProjectRoot(tmpDir);
+      fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'src', 'user-service.js'), [
+        'export class UserService {',
+        '  async registerNewUser(email, password) { return null; }',
+        '}',
+      ].join('\n'));
+      fs.writeFileSync(path.join(tmpDir, 'src', 'index.js'), "export { UserService } from './user-service.js';\n");
+      fs.writeFileSync(path.join(tmpDir, 'src', 'public-api.js'), "export * from './user-service.js';\n");
+
+      await persistIndex(buildIndex(tmpDir), tmpDir);
+
+      const result = await smartSearch({ query: 'UserService', cwd: tmpDir, mode: 'needle' });
+      assert.ok(result.topFiles.length > 0);
+      assert.match(result.topFiles[0].file, /user-service\.js$/);
+      const barrelHits = result.topFiles.filter((item) => /(?:index|public-api)\.js$/.test(item.file));
+      assert.ok(barrelHits.length <= 1, `expected at most one barrel-like duplicate, got ${barrelHits.length}`);
+    } finally {
+      setProjectRoot(savedRoot);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('applies soft repo noise penalties from global memory hints', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-search-noise-'));
+    const savedRoot = (await import('../src/utils/paths.js')).projectRoot;
+    const prevDb = process.env.DEVCTX_GLOBAL_DB;
+    const prevEnabled = process.env.DEVCTX_GLOBAL_MEMORY;
+    const tmpDb = path.join(tmpDir, 'global.db');
+
+    try {
+      setProjectRoot(tmpDir);
+      process.env.DEVCTX_GLOBAL_DB = tmpDb;
+      process.env.DEVCTX_GLOBAL_MEMORY = 'true';
+      fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'src', 'alpha-feature.js'), 'export const featureFlag = true;\n');
+      fs.writeFileSync(path.join(tmpDir, 'src', 'zeta-feature.js'), 'export const featureFlag = true;\n');
+      await persistIndex(buildIndex(tmpDir), tmpDir);
+
+      const baseline = await smartSearch({ query: 'featureFlag', cwd: tmpDir, mode: 'needle' });
+      assert.match(baseline.topFiles[0].file, /alpha-feature\.js$/);
+
+      await recordNoiseHint({ projectPath: tmpDir, hintKey: 'src/alpha-feature.js', reason: 'semantic_dedupe' });
+      await recordNoiseHint({ projectPath: tmpDir, hintKey: 'src/alpha-feature.js', reason: 'semantic_dedupe' });
+
+      const reranked = await smartSearch({ query: 'featureFlag', cwd: tmpDir, mode: 'needle' });
+      assert.match(reranked.topFiles[0].file, /zeta-feature\.js$/);
+      assert.ok((reranked.rankingBreakdown.noisePenalty ?? 0) > 0);
+    } finally {
+      setProjectRoot(savedRoot);
+      if (prevDb === undefined) delete process.env.DEVCTX_GLOBAL_DB;
+      else process.env.DEVCTX_GLOBAL_DB = prevDb;
+      if (prevEnabled === undefined) delete process.env.DEVCTX_GLOBAL_MEMORY;
+      else process.env.DEVCTX_GLOBAL_MEMORY = prevEnabled;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// smart_search session-aware re-rank
+// ---------------------------------------------------------------------------
+
+describe('smart_search session-aware rerank', () => {
+  let tmpDir;
+  let originalRoot;
+
+  beforeEach(async () => {
+    originalRoot = (await import('../src/utils/paths.js')).projectRoot;
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-search-session-'));
+    fs.mkdirSync(path.join(tmpDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'src', 'alpha-feature.js'), 'export const featureFlag = true;\n');
+    fs.writeFileSync(path.join(tmpDir, 'src', 'zeta-feature.js'), 'export const featureFlag = true;\n');
+    setProjectRoot(tmpDir);
+    await persistIndex(buildIndex(tmpDir), tmpDir);
+  });
+
+  afterEach(async () => {
+    try {
+      await smartSummary({ action: 'reset', sessionId: 'search-rerank-session' });
+    } catch {}
+    setProjectRoot(originalRoot);
+    clearReadCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('boosts touched files from the active session above otherwise tied matches', async () => {
+    const baseline = await smartSearch({ query: 'featureFlag', cwd: tmpDir, mode: 'needle' });
+    assert.match(baseline.topFiles[0].file, /alpha-feature\.js$/);
+
+    await smartSummary({
+      action: 'update',
+      sessionId: 'search-rerank-session',
+      update: {
+        goal: 'Implement zeta feature flag flow',
+        status: 'in_progress',
+        currentFocus: 'zeta feature flag',
+        touchedFiles: ['src/zeta-feature.js'],
+      },
+    });
+
+    const reranked = await smartSearch({ query: 'featureFlag', cwd: tmpDir, mode: 'needle' });
+    assert.match(reranked.topFiles[0].file, /zeta-feature\.js$/);
+    assert.ok(reranked.topFiles[0].scoreBreakdown.sessionScore > 0);
+    assert.match(reranked.topFiles[0].whyRanked, /touched-file boost|focus-path boost|goal-path boost/i);
+    assert.ok((reranked.rankingBreakdown.sessionBoost ?? 0) > 0);
   });
 });
 
@@ -942,6 +1074,76 @@ describe('smart_search smart-case', () => {
 });
 
 // ---------------------------------------------------------------------------
+// smart_search maxTokens budget
+// ---------------------------------------------------------------------------
+
+describe('smart_search maxTokens budget', () => {
+  const getCountTokens = async () => (await import('../src/tokenCounter.js')).countTokens;
+
+  it('truncates matches text to fit the requested token budget', async () => {
+    const countTk = await getCountTokens();
+    const baseline = await smartSearch({ query: 'const', cwd: 'tools/devctx/src', maxFiles: 10, mode: 'needle' });
+    const baselineTokens = countTk(baseline.matches);
+    const budget = Math.max(40, Math.floor(baselineTokens * 0.5));
+    const result = await smartSearch({ query: 'const', cwd: 'tools/devctx/src', maxFiles: 10, maxTokens: budget, mode: 'needle' });
+
+    assert.ok(result.totalMatches > 0);
+    assert.ok(Array.isArray(result.topFiles));
+    assert.equal(result.budgetApplied, true);
+    assert.equal(result.budgetDetails?.maxTokens, budget);
+    assert.equal(result.budgetDetails?.scope, 'response');
+    assert.ok(Array.isArray(result.budgetDetails?.actions));
+    assert.ok(result.budgetDetails.actions.includes('content_truncated'));
+    assert.ok(Array.isArray(result.budgetDetails?.sectionsCompacted));
+    assert.ok(result.budgetDetails.sectionsCompacted.includes('matches'));
+    assert.ok(countTk(result.matches) <= budget,
+      `matches tokens ${countTk(result.matches)} should be <= budget ${budget}`);
+    assert.ok(countTk(result.matches) < baselineTokens,
+      `matches tokens ${countTk(result.matches)} should be < baseline ${baselineTokens}`);
+  });
+
+  it('ignores maxTokens=0 and maxTokens=-1', async () => {
+    const zeroResult = await smartSearch({ query: 'const', cwd: 'tools/devctx/src', maxTokens: 0, mode: 'needle' });
+    assert.equal(zeroResult.budgetApplied, undefined);
+    assert.equal(zeroResult.budgetDetails, undefined);
+    assert.ok(!zeroResult.matches.includes('[truncated to fit'));
+
+    const negResult = await smartSearch({ query: 'const', cwd: 'tools/devctx/src', maxTokens: -1, mode: 'needle' });
+    assert.equal(negResult.budgetApplied, undefined);
+    assert.equal(negResult.budgetDetails, undefined);
+    assert.ok(!negResult.matches.includes('[truncated to fit'));
+  });
+
+  it('caps the whole response payload under tight budgets by compacting metadata too', async () => {
+    const countTk = await getCountTokens();
+    const budget = 120;
+    const result = await smartSearch({
+      query: 'user registration',
+      cwd: 'tools/devctx/tests',
+      mode: 'semantic',
+      semanticLimit: 8,
+      maxFiles: 10,
+      maxTokens: budget,
+    });
+
+    assert.equal(result.budgetApplied, true);
+    assert.equal(result.budgetDetails?.maxTokens, budget);
+    assert.equal(result.budgetDetails?.scope, 'response');
+    assert.ok(Array.isArray(result.budgetDetails?.actions));
+    assert.ok(result.budgetDetails.actions.includes('metadata_compacted'));
+    assert.ok(countTk(JSON.stringify(result)) <= budget,
+      `response tokens ${countTk(JSON.stringify(result))} should be <= budget ${budget}`);
+    assert.equal(result.semantic, undefined, 'semantic block should be dropped first under tight budget');
+    assert.ok(result.budgetDetails.sectionsCompacted.includes('semantic'));
+    if (Array.isArray(result.topFiles) && result.topFiles.length > 0) {
+      assert.equal(result.topFiles[0].scoreBreakdown, undefined);
+      assert.equal(result.topFiles[0].whyRanked, undefined);
+      assert.ok(result.topFiles[0].file);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // smart_read metadata (parser + truncated)
 // ---------------------------------------------------------------------------
 
@@ -960,6 +1162,11 @@ describe('smart_read metadata', () => {
   it('returns parser=raw for full mode', async () => {
     const result = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'full' });
     assert.equal(result.parser, 'raw');
+    assert.deepEqual(result.fullMode, {
+      requested: true,
+      used: true,
+      reason: 'explicit_request',
+    });
   });
 
   it('returns parser=ast for symbol mode on JS files', async () => {
@@ -999,6 +1206,7 @@ describe('smart_read maxTokens budget', () => {
     originalRoot = (await import('../src/utils/paths.js')).projectRoot;
     setProjectRoot(REPO_ROOT);
     clearReadCache();
+    clearTaskBudgets();
   });
 
   afterEach(() => {
@@ -1015,6 +1223,10 @@ describe('smart_read maxTokens budget', () => {
     assert.equal(budgetResult.mode, 'outline', 'mode should echo the requested mode');
     assert.ok(countTk(budgetResult.content) <= budget * 1.2,
       `content tokens ${countTk(budgetResult.content)} should be near budget ${budget}`);
+    assert.equal(budgetResult.budgetApplied, true);
+    assert.equal(budgetResult.budgetDetails?.maxTokens, budget);
+    assert.equal(budgetResult.budgetDetails?.scope, 'content');
+    assert.ok(Array.isArray(budgetResult.budgetDetails?.actions));
   });
 
   it('keeps original mode when budget is sufficient', async () => {
@@ -1025,15 +1237,67 @@ describe('smart_read maxTokens budget', () => {
     assert.equal(result.budgetApplied, undefined);
   });
 
-  it('truncates when even signatures exceeds budget', async () => {
+  it('keeps outline mode and truncates instead of escalating to heavier modes', async () => {
     const countTk = await getCountTokens();
     const budget = 15;
     const result = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'outline', maxTokens: budget });
 
     assert.ok(result.content.includes(`[truncated to fit ${budget} token budget]`));
     assert.equal(result.truncated, true);
+    assert.equal(result.chosenMode, undefined);
+    assert.equal(result.budgetApplied, true);
+    assert.deepEqual(result.budgetDetails, {
+      scope: 'content',
+      maxTokens: budget,
+      finalMode: 'outline',
+      actions: ['content_truncated'],
+    });
     assert.ok(countTk(result.content) <= budget,
       `content tokens ${countTk(result.content)} should be <= budget ${budget}`);
+  });
+
+  it('accepts tokenBudget as fallback when maxTokens is omitted', async () => {
+    const budget = 15;
+    const result = await smartRead({
+      filePath: 'tools/devctx/src/server.js',
+      mode: 'outline',
+      tokenBudget: { id: 'task-budget-read', maxTokens: budget, shared: true },
+    });
+
+    assert.equal(result.taskBudget?.id, 'task-budget-read');
+    assert.equal(result.taskBudget?.maxTokens, budget);
+    assert.equal(result.taskBudget?.shared, true);
+    assert.equal(result.budgetApplied, true);
+  });
+
+  it('consumes remainingBudget across shared smartRead calls', async () => {
+    const tokenBudget = { id: 'shared-read-budget-seq', maxTokens: 120, shared: true };
+    const first = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'outline', tokenBudget });
+    const second = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'outline', tokenBudget });
+
+    assert.equal(typeof first.remainingBudget, 'number');
+    assert.equal(typeof second.remainingBudget, 'number');
+    assert.ok(second.remainingBudget <= first.remainingBudget,
+      `remainingBudget should decrease or stay equal: ${second.remainingBudget} <= ${first.remainingBudget}`);
+  });
+
+  it('degrades explicit full mode before returning raw content under a tight budget', async () => {
+    const budget = 40;
+    const result = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'full', maxTokens: budget });
+
+    assert.equal(result.mode, 'full');
+    assert.equal(result.budgetApplied, true);
+    assert.ok(['signatures', 'outline'].includes(result.chosenMode), `unexpected chosenMode: ${result.chosenMode}`);
+    assert.equal(result.budgetDetails?.maxTokens, budget);
+    assert.equal(result.budgetDetails?.scope, 'content');
+    assert.equal(result.budgetDetails?.finalMode, result.chosenMode);
+    assert.ok(result.budgetDetails?.actions.includes('mode_degraded'));
+    assert.ok(result.fullMode);
+    assert.equal(result.fullMode.requested, true);
+    assert.equal(result.fullMode.used, false);
+    assert.equal(result.fullMode.reason, 'degraded_for_budget');
+    assert.equal(result.fullMode.fallbackMode, result.chosenMode);
+    assert.notEqual(result.parser, 'raw');
   });
 
   it('does not cascade for range mode', async () => {
@@ -1049,6 +1313,13 @@ describe('smart_read maxTokens budget', () => {
     const result = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'range', startLine: 1, endLine: 100, maxTokens: budget });
 
     assert.ok(result.content.includes(`[truncated to fit ${budget} token budget]`));
+    assert.equal(result.budgetApplied, true);
+    assert.deepEqual(result.budgetDetails, {
+      scope: 'content',
+      maxTokens: budget,
+      finalMode: 'range',
+      actions: ['content_truncated'],
+    });
     assert.ok(countTk(result.content) <= budget,
       `content tokens ${countTk(result.content)} should be <= budget ${budget}`);
   });
@@ -1056,10 +1327,12 @@ describe('smart_read maxTokens budget', () => {
   it('ignores maxTokens=0 and maxTokens=-1', async () => {
     const zeroResult = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'outline', maxTokens: 0 });
     assert.equal(zeroResult.budgetApplied, undefined, 'maxTokens=0 should be ignored');
+    assert.equal(zeroResult.budgetDetails, undefined);
     assert.ok(!zeroResult.content.includes('[truncated to fit'), 'should not truncate with maxTokens=0');
 
     const negResult = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'outline', maxTokens: -1 });
     assert.equal(negResult.budgetApplied, undefined, 'maxTokens=-1 should be ignored');
+    assert.equal(negResult.budgetDetails, undefined);
     assert.ok(!negResult.content.includes('[truncated to fit'), 'should not truncate with maxTokens=-1');
   });
 });
@@ -1071,6 +1344,8 @@ describe('smart_read maxTokens budget', () => {
 import { smartReadBatch } from '../src/tools/smart-read-batch.js';
 
 describe('smart_read_batch', () => {
+  beforeEach(() => clearTaskBudgets());
+
   it('reads multiple files in one call', async () => {
     const result = await smartReadBatch({
       files: [
@@ -1122,6 +1397,16 @@ describe('smart_read_batch', () => {
     assert.ok(result.results.length < 5, 'should stop before reading all files');
     assert.ok(result.metrics.filesSkipped > 0, 'should report skipped files');
     assert.equal(result.metrics.filesRead + result.metrics.filesSkipped, 5);
+    assert.equal(result.budgetApplied, true);
+    assert.deepEqual(result.budgetDetails, {
+      scope: 'batch',
+      maxTokens: 50,
+      actions: ['batch_stopped_early'],
+      filesRead: result.metrics.filesRead,
+      filesSkipped: result.metrics.filesSkipped,
+      stopReason: 'batch_token_limit',
+      stoppedBefore: 'tools/devctx/src/metrics.js',
+    });
   });
 
   it('applies per-file maxTokens budget', async () => {
@@ -1135,6 +1420,24 @@ describe('smart_read_batch', () => {
     const r = result.results[0];
     assert.ok(r.content.includes('[truncated to fit') || r.budgetApplied,
       'per-file maxTokens should trigger cascade or truncation');
+    if (r.budgetApplied) {
+      assert.equal(r.budgetDetails?.maxTokens, 15);
+      assert.ok(Array.isArray(r.budgetDetails?.actions));
+    }
+    assert.equal(result.budgetDetails, undefined);
+  });
+
+  it('propagates shared tokenBudget metadata to the batch response', async () => {
+    const result = await smartReadBatch({
+      files: [
+        { path: 'tools/devctx/src/server.js', mode: 'outline' },
+      ],
+      tokenBudget: { id: 'task-budget-batch', maxTokens: 25, shared: true },
+    });
+
+    assert.equal(result.taskBudget?.id, 'task-budget-batch');
+    assert.equal(result.taskBudget?.maxTokens, 25);
+    assert.equal(result.taskBudget?.shared, true);
   });
 
   it('isolates errors per item without aborting batch', async () => {
@@ -1873,9 +2176,49 @@ describe('response contract smart_search', () => {
   it('returns core contract fields', async () => {
     const result = await smartSearch({ query: 'createUser', cwd: fixtureRoot });
     assert.ok(result.query);
+    assert.equal(result.mode, 'balanced');
     assert.ok(Array.isArray(result.topFiles));
     assert.ok(typeof result.totalMatches === 'number');
     assert.ok(typeof result.matchedFiles === 'number');
+    assert.ok(typeof result.hasMore === 'boolean');
+    assert.ok(typeof result.rankingBreakdown === 'object' && result.rankingBreakdown !== null);
+  });
+
+  it('returns ranking breakdown and per-file score diagnostics', async () => {
+    const result = await smartSearch({ query: 'AuthMiddleware', cwd: fixtureRoot });
+    assert.ok(typeof result.rankingBreakdown.textMatch === 'number');
+    assert.ok(typeof result.rankingBreakdown.indexBoost === 'number');
+    assert.ok(typeof result.rankingBreakdown.graphBoost === 'number');
+    assert.ok(typeof result.rankingBreakdown.sessionBoost === 'number');
+    if (result.topFiles.length > 0) {
+      const top = result.topFiles[0];
+      assert.ok(typeof top.scoreBreakdown.textScore === 'number');
+      assert.ok(typeof top.scoreBreakdown.sessionScore === 'number');
+      assert.ok(typeof top.scoreBreakdown.finalScore === 'number');
+      assert.ok(typeof top.whyRanked === 'string' && top.whyRanked.length > 0);
+    }
+  });
+
+  it('defaults to a 5-file window and exposes expansion hints', async () => {
+    const result = await smartSearch({ query: 'assert', cwd: 'tools/devctx/tests' });
+    assert.ok(result.matchedFiles <= 5);
+    assert.equal(result.hasMore, (result.totalFiles ?? result.matchedFiles) > result.matchedFiles);
+    if (result.hasMore) {
+      assert.ok(typeof result.totalFiles === 'number');
+      assert.ok(result.totalFiles > result.matchedFiles);
+      assert.ok(typeof result.nextSuggestedMaxFiles === 'number');
+      assert.ok(result.nextSuggestedMaxFiles > result.matchedFiles);
+      assert.ok(Array.isArray(result.suggestions));
+      assert.ok(result.suggestions.length > 0);
+      assert.match(result.matches, /Refinements:/);
+    }
+  });
+
+  it('respects explicit maxFiles when expanding result window', async () => {
+    const baseline = await smartSearch({ query: 'assert', cwd: 'tools/devctx/tests' });
+    const result = await smartSearch({ query: 'assert', cwd: 'tools/devctx/tests', maxFiles: 10 });
+    assert.ok(result.matchedFiles <= 10);
+    assert.ok(result.matchedFiles >= baseline.matchedFiles);
   });
 
   it('returns intent when provided', async () => {
@@ -2319,6 +2662,7 @@ describe('smart_context maxTokens budget', () => {
   beforeEach(() => {
     setProjectRoot(fixtureRoot);
     clearReadCache();
+    clearTaskBudgets();
   });
 
   after(() => {
@@ -2338,6 +2682,19 @@ describe('smart_context maxTokens budget', () => {
     for (const p of primaries) {
       assert.ok(!p.content || p.content.length < 2000, 'primary files should stay compact on tight budget');
     }
+  });
+
+  it('shares remainingBudget across smart_context and smart_read when tokenBudget id is reused', async () => {
+    const tokenBudget = { id: 'shared-context-read-budget', maxTokens: 500, shared: true };
+    const contextResult = await smartContext({ task: 'Review smart-turn orchestration and session management', tokenBudget });
+    const primaryFile = contextResult.context.find((item) => item.role === 'primary')?.file;
+    assert.ok(primaryFile, 'smart_context should return a primary file to re-read');
+    const readResult = await smartRead({ filePath: primaryFile, mode: 'signatures', tokenBudget });
+
+    assert.equal(typeof contextResult.remainingBudget, 'number');
+    assert.equal(typeof readResult.remainingBudget, 'number');
+    assert.ok(readResult.remainingBudget <= contextResult.remainingBudget,
+      `shared remainingBudget should decrease across calls: ${readResult.remainingBudget} <= ${contextResult.remainingBudget}`);
   });
 });
 
@@ -2832,6 +3189,7 @@ describe('response metadata contract', () => {
   it('smart_read full returns parser=raw', async () => {
     const result = await smartRead({ filePath: 'tools/devctx/src/server.js', mode: 'full' });
     assert.strictEqual(result.parser, 'raw');
+    assert.strictEqual(result.fullMode?.used, true);
   });
 
   it('smart_read symbol with context includes graphCoverage', async () => {

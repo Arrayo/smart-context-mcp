@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { projectRoot } from '../utils/runtime-config.js';
 
 export const STATE_DB_FILENAME = 'state.sqlite';
-export const SQLITE_SCHEMA_VERSION = 7;
+export const SQLITE_SCHEMA_VERSION = 8;
 export const ACTIVE_SESSION_SCOPE = 'project';
 export const STATE_DB_SOFT_MAX_BYTES = 32 * 1024 * 1024;
 const STATE_DB_BUSY_TIMEOUT_MS = 1000;
@@ -20,6 +20,7 @@ export const EXPECTED_TABLES = [
   'hook_turn_state',
   'meta',
   'metrics_events',
+  'read_cache',
   'session_events',
   'sessions',
   'summary_cache',
@@ -264,6 +265,26 @@ const MIGRATIONS = [
         ON explain_cache(file_path, symbol, updated_at DESC)`,
       `CREATE INDEX IF NOT EXISTS idx_explain_cache_updated
         ON explain_cache(updated_at DESC)`,
+    ],
+  },
+  {
+    version: 8,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS read_cache (
+        cache_key TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        selector TEXT NOT NULL DEFAULT '',
+        content_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        tokens INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_read_cache_file_mode
+        ON read_cache(file_path, mode, updated_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_read_cache_updated
+        ON read_cache(updated_at DESC)`,
     ],
   },
 ];
@@ -1512,6 +1533,7 @@ export const runStorageMaintenance = async ({
     workflowMetrics: removeOlder('DELETE FROM workflow_metrics WHERE created_at < ?'),
     contextAccess: removeOlder('DELETE FROM context_access WHERE timestamp < ?'),
     explainCache: removeOlder('DELETE FROM explain_cache WHERE updated_at < ?'),
+    readCache: removeOlder('DELETE FROM read_cache WHERE updated_at < ?'),
   };
 
   setMeta(db, STORAGE_GC_META_KEY, String(now));
@@ -1955,6 +1977,9 @@ export const cleanupLegacyState = async ({
 const buildExplainCacheKey = ({ filePath, symbol, contentHash }) =>
   createHash('sha256').update(`${filePath}\u241F${symbol}\u241F${contentHash}`).digest('hex');
 
+const buildReadCacheKey = ({ filePath, mode, selector = '', contentHash }) =>
+  createHash('sha256').update(`${filePath}\u241F${mode}\u241F${selector}\u241F${contentHash}`).digest('hex');
+
 export const getExplainCache = async ({
   filePath: dbPath = getStateDbPath(),
   relPath,
@@ -2003,6 +2028,55 @@ export const setExplainCache = async ({
 
 export const clearExplainCache = async ({ filePath = getStateDbPath() } = {}) => withStateDb((db) => {
   return db.prepare('DELETE FROM explain_cache').run().changes;
+}, { filePath });
+
+export const getReadCache = async ({
+  filePath: dbPath = getStateDbPath(),
+  relPath,
+  mode,
+  selector = '',
+  contentHash,
+} = {}) => withStateDb((db) => {
+  if (!relPath || !mode || !contentHash) return null;
+  const cacheKey = buildReadCacheKey({ filePath: relPath, mode, selector, contentHash });
+  const row = db.prepare(`
+    SELECT payload_json, tokens, updated_at
+    FROM read_cache
+    WHERE cache_key = ?
+  `).get(cacheKey);
+  if (!row) return null;
+  return {
+    payload: parseJsonText(row.payload_json, null),
+    tokens: row.tokens,
+    updatedAt: row.updated_at,
+  };
+}, { filePath: dbPath });
+
+export const setReadCache = async ({
+  filePath: dbPath = getStateDbPath(),
+  relPath,
+  mode,
+  selector = '',
+  contentHash,
+  payload,
+  tokens = 0,
+} = {}) => withStateDb((db) => {
+  if (!relPath || !mode || !contentHash || !payload) return null;
+  const cacheKey = buildReadCacheKey({ filePath: relPath, mode, selector, contentHash });
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO read_cache(cache_key, file_path, mode, selector, content_hash, payload_json, tokens, created_at, updated_at)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(cache_key) DO UPDATE SET
+      payload_json = excluded.payload_json,
+      tokens = excluded.tokens,
+      updated_at = excluded.updated_at
+  `).run(cacheKey, relPath, mode, selector, contentHash, toJsonText(payload), tokens, now, now);
+  return { cacheKey, updatedAt: now };
+}, { filePath: dbPath });
+
+export const clearReadCachePersistent = async ({ filePath = getStateDbPath() } = {}) => withStateDb((db) => {
+  return db.prepare('DELETE FROM read_cache').run().changes;
 }, { filePath });
 
 const LAST_TEST_FAILURE_META_KEY = 'last_test_failure';

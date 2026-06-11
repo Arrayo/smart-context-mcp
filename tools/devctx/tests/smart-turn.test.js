@@ -53,6 +53,7 @@ test('smart_turn start reuses aligned persisted context', { skip: SKIP_SQLITE_TE
     phase: 'start',
     sessionId: 'turn-aligned',
     prompt: 'Finish the smart metrics repo safety tests and keep runtime enforcement in place',
+    verbosity: 'standard',
   });
 
   assert.strictEqual(result.phase, 'start');
@@ -74,6 +75,7 @@ test('smart_turn start can auto-create a planning session for a substantial new 
     phase: 'start',
     prompt: 'Design the final orchestration layer so every meaningful agent turn rehydrates context and checkpoints progress automatically',
     ensureSession: true,
+    verbosity: 'standard',
   });
 
   assert.strictEqual(result.phase, 'start');
@@ -110,6 +112,7 @@ test('smart_turn start refreshes lightweight context for the new prompt', { skip
     phase: 'start',
     prompt: 'Fix the token error in loginHandler and continue the auth debugging flow',
     ensureSession: true,
+    verbosity: 'standard',
   });
 
   assert.ok(result.refreshedContext);
@@ -138,6 +141,7 @@ test('smart_turn start isolates a new session when the prompt mismatches the act
     phase: 'start',
     prompt: 'Document an unrelated headless wrapper onboarding flow for new sessions',
     ensureSession: true,
+    verbosity: 'standard',
   });
 
   assert.strictEqual(result.found, true);
@@ -159,6 +163,7 @@ test('smart_turn start and end integrate workflow tracking when enabled', { skip
       phase: 'start',
       prompt: 'Fix the login error in the auth handler and verify the failing test',
       ensureSession: true,
+      verbosity: 'standard',
     });
 
     assert.equal(start.workflow?.enabled, true);
@@ -342,6 +347,7 @@ test('smart_turn end does not close workflow when checkpoint is skipped', { skip
       phase: 'start',
       prompt: 'Fix the login error in the auth handler and verify the failing test',
       ensureSession: true,
+      verbosity: 'standard',
     });
 
     const end = await smartTurn({
@@ -388,6 +394,7 @@ test('smart_turn start refreshes context when the index is unavailable', { skip:
     phase: 'start',
     prompt: 'Inspect the indexlessThing implementation and continue that task',
     ensureSession: true,
+    verbosity: 'standard',
   });
 
   assert.ok(result.refreshedContext);
@@ -417,6 +424,7 @@ test('smart_turn end checkpoints a meaningful turn update', { skip: SKIP_SQLITE_
     phase: 'end',
     sessionId: 'turn-end',
     event: 'milestone',
+    verbosity: 'standard',
     update: {
       completed: ['Implemented smart_turn orchestration flow'],
       decisions: ['Use smart_turn as the default context entrypoint for non-trivial prompts'],
@@ -436,4 +444,30 @@ test('smart_turn end checkpoints a meaningful turn update', { skip: SKIP_SQLITE_
   assert.match(result.recommendedPath.next, /restart with smart_turn\(start/i);
 
   await smartSummary({ action: 'reset', sessionId: 'turn-end' });
+});
+
+test('smart_turn start echoes normalized task budget when provided', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
+  const result = await smartTurn({
+    phase: 'start',
+    prompt: 'Review smart-turn orchestration and checkpoint behavior in this repo.',
+    ensureSession: false,
+    tokenBudget: { id: 'turn-budget', maxTokens: 250, shared: true },
+  });
+
+  assert.equal(result.taskBudget?.id, 'turn-budget');
+  assert.equal(result.taskBudget?.maxTokens, 250);
+  assert.equal(result.taskBudget?.shared, true);
+});
+
+test('smart_turn start skips continuity setup for a simple task prompt', { skip: SKIP_SQLITE_TESTS ? 'SQLite support requires Node 22+' : false }, async () => {
+  const result = await smartTurn({
+    phase: 'start',
+    prompt: 'fix import',
+    ensureSession: true,
+  });
+
+  assert.equal(result.skipSmartTurn, true);
+  assert.equal(result.continuity?.state, 'simple_task_skip');
+  assert.equal(result.sessionId, undefined);
+  assert.equal(result.recommendedPath?.mode, 'simple_task_skip');
 });

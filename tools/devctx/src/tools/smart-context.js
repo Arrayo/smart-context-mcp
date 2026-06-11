@@ -11,6 +11,7 @@ import { buildPathsResult } from '../graph-paths.js';
 import { projectRoot } from '../utils/paths.js';
 import { resolveSafePath } from '../utils/fs.js';
 import { countTokens } from '../tokenCounter.js';
+import { consumeTokenBudget, normalizeTokenBudget, resolveTokenBudgetWindow } from '../utils/task-budget.js';
 import { persistMetrics } from '../metrics.js';
 import { predictContextFiles, recordContextAccess } from '../context-patterns.js';
 import { recordToolUsage } from '../usage-feedback.js';
@@ -411,6 +412,7 @@ export const smartContext = async ({
   task,
   intent,
   maxTokens = 12000,
+  tokenBudget,
   entryFile,
   diff,
   detail = 'balanced',
@@ -423,6 +425,9 @@ export const smartContext = async ({
 }) => {
   const progress = enableProgress ? createProgressReporter('smart_context') : null;
   const startTime = Date.now();
+  const normalizedTokenBudget = normalizeTokenBudget(tokenBudget);
+  const budgetWindow = resolveTokenBudgetWindow({ tokenBudget: normalizedTokenBudget, maxTokens });
+  const effectiveMaxTokens = budgetWindow.effectiveMaxTokens ?? 12000;
 
   if (paths && typeof paths === 'object' && paths.from && paths.to && !task) {
     if (progress) {
@@ -650,7 +655,7 @@ export const smartContext = async ({
   attachSymbolEvidence(expanded, index, symbolCandidates);
   normalizePrimaryCandidate(expanded, task, resolvedIntent);
 
-  const readPlan = allocateReads(expanded, maxTokens, resolvedIntent, detailMode);
+  const readPlan = allocateReads(expanded, effectiveMaxTokens, resolvedIntent, detailMode);
 
   const context = [];
   let totalRawTokens = 0;
@@ -661,7 +666,7 @@ export const smartContext = async ({
   for (const item of readPlan) {
     const basePayload = buildContextItemPayload(item, index, detailMode);
     const baseTokens = countTokens(JSON.stringify(basePayload));
-    if (totalCompressedTokens + baseTokens > maxTokens && context.length > 0) break;
+    if (totalCompressedTokens + baseTokens > effectiveMaxTokens && context.length > 0) break;
 
     const contextIndex = context.length;
     context.push(basePayload);
@@ -700,7 +705,7 @@ export const smartContext = async ({
       const newTokens = countTokens(JSON.stringify(enrichedPayload));
       const tokenDelta = newTokens - oldTokens;
 
-      if (totalCompressedTokens + tokenDelta > maxTokens && pending.contextIndex > 0) continue;
+      if (totalCompressedTokens + tokenDelta > effectiveMaxTokens && pending.contextIndex > 0) continue;
 
       context[pending.contextIndex] = enrichedPayload;
       filesWithContent.add(pending.item.rel);
@@ -727,7 +732,7 @@ export const smartContext = async ({
             content: filtered,
           };
           const symbolTokens = countTokens(JSON.stringify(symbolPayload));
-          if (totalCompressedTokens + symbolTokens <= maxTokens) {
+          if (totalCompressedTokens + symbolTokens <= effectiveMaxTokens) {
             context.push(symbolPayload);
             totalCompressedTokens += symbolTokens;
 
@@ -881,6 +886,7 @@ export const smartContext = async ({
       filesIncluded,
       filesEvaluated: expanded.size,
       detailMode,
+      maxTokens: effectiveMaxTokens,
       totalTokens: countTokens(context.map((c) => c.content || '').join('')),
       ...(prefetchResult ? {
         prefetch: {
@@ -893,6 +899,14 @@ export const smartContext = async ({
     },
     ...(includeSet.has('hints') ? { hints } : {}),
   };
+
+  if (normalizedTokenBudget) {
+    result.taskBudget = normalizedTokenBudget;
+    result.remainingBudget = consumeTokenBudget({
+      tokenBudget: normalizedTokenBudget,
+      usedTokens: totalCompressedTokens,
+    });
+  }
 
   if (diffSummary) {
     diffSummary.included = context.filter((c) => c.role === 'primary').length;
