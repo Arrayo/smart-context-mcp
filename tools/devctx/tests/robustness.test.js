@@ -21,6 +21,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const execFile = promisify(execFileCallback);
 
+const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+const SKIP_SQLITE_TESTS = nodeMajor < 22 ? 'SQLite support requires Node 22+' : false;
+
 // ---------------------------------------------------------------------------
 // find hardening
 // ---------------------------------------------------------------------------
@@ -906,7 +909,7 @@ describe('smart_search ranking', () => {
     }
   });
 
-  it('applies soft repo noise penalties from global memory hints', async () => {
+  it('applies soft repo noise penalties from global memory hints', { skip: SKIP_SQLITE_TESTS }, async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-search-noise-'));
     const savedRoot = (await import('../src/utils/paths.js')).projectRoot;
     const prevDb = process.env.DEVCTX_GLOBAL_DB;
@@ -946,7 +949,7 @@ describe('smart_search ranking', () => {
 // smart_search session-aware re-rank
 // ---------------------------------------------------------------------------
 
-describe('smart_search session-aware rerank', () => {
+describe('smart_search session-aware rerank', { skip: SKIP_SQLITE_TESTS }, () => {
   let tmpDir;
   let originalRoot;
 
