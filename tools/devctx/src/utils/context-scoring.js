@@ -6,20 +6,26 @@ const ROLE_RANK = Object.fromEntries(ROLE_PRIORITY.map((role, idx) => [role, idx
 const EVIDENCE_PRIORITY = {
   entryFile: 0,
   diffHit: 1,
-  searchHit: 2,
-  symbolMatch: 3,
-  symbolDetail: 4,
-  testOf: 5,
-  dependencyOf: 6,
-  dependentOf: 7,
+  semanticDefinition: 2,
+  searchHit: 3,
+  symbolMatch: 4,
+  symbolDetail: 5,
+  semanticImplementation: 6,
+  semanticReference: 7,
+  testOf: 8,
+  dependencyOf: 9,
+  dependentOf: 10,
 };
 const ROLE_BASE_SCORE = { primary: 130, test: 85, dependency: 60, dependent: 50 };
 const EVIDENCE_BASE_SCORE = {
   entryFile: 120,
   diffHit: 100,
+  semanticDefinition: 115,
   searchHit: 70,
   symbolMatch: 90,
   symbolDetail: 95,
+  semanticImplementation: 88,
+  semanticReference: 80,
   testOf: 40,
   dependencyOf: 25,
   dependentOf: 22,
@@ -65,6 +71,8 @@ const evidenceKey = (evidence) => JSON.stringify([
   evidence.ref ?? null,
   evidence.rank ?? null,
   evidence.query ?? null,
+  evidence.symbol ?? null,
+  evidence.relation ?? null,
   Array.isArray(evidence.symbols) ? evidence.symbols.join('|') : null,
 ]);
 
@@ -102,6 +110,12 @@ export const formatReasonIncluded = (evidence = []) => {
       return `symbol: ${(primary.symbols ?? []).slice(0, 2).join(', ')}`;
     case 'symbolDetail':
       return `detail: ${(primary.symbols ?? []).slice(0, 2).join(', ')}`;
+    case 'semanticDefinition':
+      return primary.symbol ? `semantic-def: ${primary.symbol}` : 'semantic-def';
+    case 'semanticImplementation':
+      return primary.symbol ? `semantic-impl: ${primary.symbol}` : 'semantic-impl';
+    case 'semanticReference':
+      return primary.symbol ? `semantic-ref: ${primary.symbol}` : 'semantic-ref';
     case 'testOf':
       return primary.via ? `test: ${primary.via}` : 'test';
     case 'dependencyOf':
@@ -219,9 +233,18 @@ export const computeStaticUtility = (candidate, intent) => {
 
 export const inferRelatedRole = (candidate) => {
   const evidenceTypes = new Set((candidate.evidence ?? []).map((item) => item.type));
-  if (evidenceTypes.has('testOf')) return 'test';
+  const isTest = TEST_FILE_RE.test((candidate.rel ?? '').toLowerCase());
+  if (evidenceTypes.has('testOf') || (evidenceTypes.has('semanticReference') && isTest)) {
+    return 'test';
+  }
   if (evidenceTypes.has('dependencyOf')) return 'dependency';
-  if (evidenceTypes.has('dependentOf')) return 'dependent';
+  if (
+    evidenceTypes.has('dependentOf')
+    || evidenceTypes.has('semanticReference')
+    || evidenceTypes.has('semanticImplementation')
+  ) {
+    return 'dependent';
+  }
   return 'dependent';
 };
 
@@ -232,6 +255,9 @@ export const computePrimarySignal = (candidate, intent) => {
   for (const evidence of candidate.evidence ?? []) {
     if (evidence.type === 'entryFile') score += 120;
     if (evidence.type === 'diffHit') score += 110;
+    if (evidence.type === 'semanticDefinition') score += 118;
+    if (evidence.type === 'semanticImplementation') score += 95;
+    if (evidence.type === 'semanticReference') score += 70;
     if (evidence.type === 'searchHit') score += Math.max(0, 28 - ((evidence.rank ?? 1) - 1) * 6);
     if (evidence.type === 'symbolMatch') score += (evidence.symbols?.length ?? 0) * 10;
     if (evidence.type === 'symbolDetail') score += (evidence.symbols?.length ?? 0) * 12;

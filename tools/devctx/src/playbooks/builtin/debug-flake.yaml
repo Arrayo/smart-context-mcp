@@ -7,6 +7,13 @@ steps:
     label: lastFailure
     args:
       action: last_failure
+  - tool: smart_output
+    label: previousFailures
+    args:
+      action: search
+      kind: test
+      status: fail
+      limit: 3
   - tool: smart_context
     args:
       task: "Debug last failing test"

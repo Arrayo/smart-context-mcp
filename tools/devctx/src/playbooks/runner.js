@@ -4,6 +4,8 @@ import { smartRead } from '../tools/smart-read.js';
 import { smartReadBatch } from '../tools/smart-read-batch.js';
 import { smartTest } from '../tools/smart-test.js';
 import { smartReview } from '../tools/smart-review.js';
+import { smartCode } from '../tools/smart-code.js';
+import { smartOutput } from '../tools/smart-output.js';
 import { smartShell } from '../tools/smart-shell.js';
 import { smartSummary } from '../tools/smart-summary.js';
 import { smartTurn } from '../tools/smart-turn.js';
@@ -18,6 +20,8 @@ const TOOL_REGISTRY = {
   smart_read_batch: smartReadBatch,
   smart_test: smartTest,
   smart_review: smartReview,
+  smart_code: smartCode,
+  smart_output: smartOutput,
   smart_shell: smartShell,
   smart_summary: smartSummary,
   smart_turn: smartTurn,

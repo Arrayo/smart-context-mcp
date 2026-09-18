@@ -6,7 +6,7 @@ Agent rules are **task-specific guidance** that help AI agents use the MCP effec
 
 ## Why This Matters
 
-The MCP provides 20 tools, but without guidance, agents often:
+The MCP provides 22 tools, but without guidance, agents often:
 - Read full files when signatures would suffice
 - Use Grep instead of `smart_search`
 - Skip task checkpoint recovery

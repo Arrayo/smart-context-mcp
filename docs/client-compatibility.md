@@ -734,7 +734,7 @@ cat AGENTS.md | grep "devctx:start"
 - ✅ Full MCP
 - ✅ Agent rules
 - ✅ `smart_turn` session persistence (Node 22+)
-- ✅ All 20 tools
+- ✅ All 22 tools
 
 **Differences:**
 - Conditional rules (Cursor only)

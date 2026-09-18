@@ -208,6 +208,7 @@ const runRun = async ({ runner = 'npm-test', script, files, ref, persistFailure 
     output: stdout,
     stderr,
     savedFailureAt: savedFailure?.recordedAt ?? null,
+    ...(shellResult.outputRef ? { outputRef: shellResult.outputRef } : {}),
   };
 };
 

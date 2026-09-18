@@ -304,27 +304,35 @@ export const getNoiseHints = async ({
   }
 
   const projectHash = hashProjectPath(projectPath);
-  return withDb((db) => {
-    if (!db) return { hints: [], total: 0 };
-    const rows = db.prepare(`
-      SELECT hint_key, reason, hits, updated_at
-      FROM noise_hints
-      WHERE project_hash = ?
-      ORDER BY hits DESC, updated_at DESC
-      LIMIT ?
-    `).all(projectHash, limit);
+  try {
+    return await withDb((db) => {
+      if (!db) return { hints: [], total: 0 };
+      const rows = db.prepare(`
+        SELECT hint_key, reason, hits, updated_at
+        FROM noise_hints
+        WHERE project_hash = ?
+        ORDER BY hits DESC, updated_at DESC
+        LIMIT ?
+      `).all(projectHash, limit);
 
-    return {
-      hints: rows.map((row) => ({
-        hintKey: row.hint_key,
-        reason: row.reason,
-        hits: Number(row.hits),
-        penalty: Math.min(Number(row.hits) * 2, 12),
-        updatedAt: Number(row.updated_at),
-      })),
-      total: rows.length,
-    };
-  }, { filePath, readOnly: true });
+      return {
+        hints: rows.map((row) => ({
+          hintKey: row.hint_key,
+          reason: row.reason,
+          hits: Number(row.hits),
+          penalty: Math.min(Number(row.hits) * 2, 12),
+          updatedAt: Number(row.updated_at),
+        })),
+        total: rows.length,
+      };
+    }, { filePath, readOnly: true });
+  } catch (error) {
+    // Older global databases may predate the optional noise_hints table.
+    if (/no such table:\s*noise_hints/i.test(error?.message ?? '')) {
+      return { hints: [], total: 0, schemaIncomplete: true };
+    }
+    throw error;
+  }
 };
 
 export const resetNoiseHints = async ({

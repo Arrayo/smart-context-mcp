@@ -46,10 +46,12 @@ import {
   computeMarginalPenalty,
   scorePrimarySeed,
   rerankPrimarySeeds,
+  formatReasonIncluded,
   ROLE_RANK,
   ROLE_BASE_SCORE,
   EVIDENCE_BASE_SCORE,
 } from '../utils/context-scoring.js';
+import { expandWithSemantic } from '../semantic/context-expand.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -235,7 +237,7 @@ const shouldIncludeSymbolSignatures = (item, symbolPreviews) => {
   return symbolPreviews.length === 0;
 };
 
-const buildContextItemPayload = (item, index, detailMode, readMode = 'index-only', content = null) => {
+const buildContextItemPayload = (item, index, detailMode, readMode = 'index-only', content = null, { includeWhy = false } = {}) => {
   const fileSymbolEntries = getFileSymbolEntries(index, item.rel);
   const symbolPreviews = buildSymbolPreviews(
     fileSymbolEntries,
@@ -248,10 +250,12 @@ const buildContextItemPayload = (item, index, detailMode, readMode = 'index-only
   const symbolSignatures = shouldIncludeSymbolSignatures(item, symbolPreviews)
     ? getSymbolSignatures(fileSymbolEntries, getSymbolSignatureLimit(item, detailMode, readMode))
     : [];
+  const evidence = dedupeEvidence(item.evidence ?? []);
 
   return {
     file: item.rel,
     role: item.role,
+    ...(includeWhy ? { whyIncluded: formatReasonIncluded(evidence) } : {}),
     ...(fileSymbols.length > 0 ? { symbols: fileSymbols } : {}),
     ...(symbolSignatures.length > 0 ? { symbolSignatures } : {}),
     ...(symbolPreviews.length > 0 ? { symbolPreviews } : {}),
@@ -655,6 +659,38 @@ export const smartContext = async ({
   attachSymbolEvidence(expanded, index, symbolCandidates);
   normalizePrimaryCandidate(expanded, task, resolvedIntent);
 
+  let semanticSummary = null;
+  if (includeSet.has('semantic')) {
+    if (progress) {
+      progress.report({ phase: 'semantic-expand', symbols: symbolCandidates.slice(0, 3).length });
+    }
+    try {
+      semanticSummary = await expandWithSemantic({
+        root,
+        expanded,
+        symbolCandidates,
+        primarySeeds: primarySeedsLimited,
+        index,
+        maxSymbols: 3,
+        maxFiles: 6,
+      });
+      for (const [, info] of expanded) {
+        info.evidence = dedupeEvidence(info.evidence ?? []);
+      }
+    } catch (error) {
+      semanticSummary = {
+        enabled: true,
+        provider: 'fallback',
+        confidence: 'none',
+        symbolsResolved: [],
+        filesAdded: 0,
+        locationsSeen: 0,
+        reason: error?.message ?? 'semantic expansion failed',
+      };
+    }
+  }
+
+  const includeWhy = includeSet.has('semantic');
   const readPlan = allocateReads(expanded, effectiveMaxTokens, resolvedIntent, detailMode);
 
   const context = [];
@@ -664,7 +700,7 @@ export const smartContext = async ({
   const pendingReads = [];
 
   for (const item of readPlan) {
-    const basePayload = buildContextItemPayload(item, index, detailMode);
+    const basePayload = buildContextItemPayload(item, index, detailMode, 'index-only', null, { includeWhy });
     const baseTokens = countTokens(JSON.stringify(basePayload));
     if (totalCompressedTokens + baseTokens > effectiveMaxTokens && context.length > 0) break;
 
@@ -700,6 +736,7 @@ export const smartContext = async ({
         detailMode,
         pending.item.mode,
         readResult.content,
+        { includeWhy },
       );
       const oldTokens = countTokens(JSON.stringify(existing));
       const newTokens = countTokens(JSON.stringify(enrichedPayload));
@@ -779,6 +816,11 @@ export const smartContext = async ({
   }
   if (indexFreshness === 'unavailable') {
     hints.push('No symbol index — run build_index for graph expansion and ranking boosts');
+  }
+  if (semanticSummary?.provider === 'fallback' || semanticSummary?.confidence === 'none') {
+    hints.push('Semantic expansion unavailable — import graph used as fallback');
+  } else if (semanticSummary?.filesAdded > 0) {
+    hints.push(`Semantic expansion added ${semanticSummary.filesAdded} related file(s)`);
   }
   if (diff && context.length === 0) {
     hints.push(diffSummary?.error || 'No changed files found for the given diff ref');
@@ -882,6 +924,7 @@ export const smartContext = async ({
     confidence: { indexFreshness, graphCoverage: graphCov },
     context,
     ...(includeSet.has('graph') ? { graph: graphSummary, graphCoverage: graphCov } : {}),
+    ...(semanticSummary ? { semantic: semanticSummary } : {}),
     stats: {
       filesIncluded,
       filesEvaluated: expanded.size,
@@ -894,6 +937,15 @@ export const smartContext = async ({
           confidence: prefetchResult.confidence || 0,
           predictedFiles: prefetchResult.predicted?.length || 0,
           matchedPattern: prefetchResult.matchedPattern || null,
+        },
+      } : {}),
+      ...(semanticSummary ? {
+        semantic: {
+          enabled: true,
+          provider: semanticSummary.provider,
+          confidence: semanticSummary.confidence,
+          filesAdded: semanticSummary.filesAdded,
+          symbolsResolved: semanticSummary.symbolsResolved?.filter((item) => item.found).length ?? 0,
         },
       } : {}),
     },

@@ -7,6 +7,7 @@ import { pickRelevantLines, truncate, uniqueLines } from '../utils/text.js';
 import { recordToolUsage } from '../usage-feedback.js';
 import { recordDecision, DECISION_REASONS, EXPECTED_BENEFITS } from '../decision-explainer.js';
 import { recordDevctxOperation } from '../missed-opportunities.js';
+import { captureOutput, inferKindFromCommand } from '../outputs/store.js';
 const execFile = promisify(execFileCallback);
 const isShellDisabled = () => process.env.DEVCTX_SHELL_DISABLED === 'true';
 const DEFAULT_TIMEOUT_MS = 15000;
@@ -447,12 +448,23 @@ export const smartShell = async ({ command }) => {
     context: `${outputLines} lines → ${compressedText.split('\n').length} lines (relevant only)`,
   });
 
+  const captured = await captureOutput({
+    kind: inferKindFromCommand(command),
+    label: command.slice(0, 120),
+    command,
+    exitCode: execution.code,
+    content: rawText,
+  });
+
   const result = {
     command,
     exitCode: execution.code,
     blocked: false,
     output: compressedText,
     ...(execution.timedOut ? { timedOut: true } : {}),
+    ...(captured.saved
+      ? { outputRef: { id: captured.entry.id, kind: captured.entry.kind, lines: captured.entry.lines } }
+      : {}),
   };
 
   return result;

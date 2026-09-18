@@ -2,6 +2,74 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.21.0] - 2026-09-18
+
+Minor release built around a **semantic engine** for JS/TS. MCP grows from **20 → 22 tools** (`smart_code` + `smart_output`). `SQLITE_SCHEMA_VERSION` bumps 8 → 9 (new `outputs` table), migrating automatically on first run. **Zero new runtime dependencies**: the TypeScript LanguageService is read from the `typescript` package already present in the project, and every semantic call degrades to a fallback provider when it cannot initialize. Suite green at 956/957 (1 skipped, 0 fail).
+
+Implemented as phases 0–6 of `docs/semantic-engine-roadmap.md`. Phase 7 (grouped MCP API) is deliberately not started: it requires adoption metrics before any surface reduction.
+
+### Added — `smart_code` (new tool): semantic navigation
+
+- Resolves by **symbol name** (plus optional `filePath`) instead of requiring a line/column, scoring named declarations so exports win over local shadows. Line/character still accepted.
+- Actions `definition`, `references`, `implementations`, `diagnostics`. Returns compact locations (file + 1-based `start`/`end`) and **never full file bodies**.
+- `includeTests: false` drops test/spec paths; `maxResults` (default 20) caps the payload and reports truncation.
+- Diagnostics are normalized to a stable shape with `severity` derived from the TypeScript category, so callers don't parse TS internals.
+- New `src/semantic/` module: contract (`semantic-provider.js`), TypeScript provider, fallback provider, and shared types. Registered in the playbook tool registry.
+
+### Added — `smart_code(action='impact')`: impact analysis
+
+- Splits **direct** impact (semantic: definitions, references, implementations) from **transitive** files (import graph, `maxHops` default 2) and related tests, plus coverage flags.
+- `risk.level` carries `basis: 'heuristic'` and an explicit `note` stating it is not semantic certainty. Counts and coverage drive the heuristic; it is a ranking aid, not a verdict.
+- Falls back to an empty, clearly-labelled payload instead of failing when the symbol cannot be resolved.
+
+### Added — `smart_code(action='rename')`: scope-aware refactor, dry run by default
+
+- Uses `findRenameLocations`, so call sites and re-exports are followed by scope rather than by text matching.
+- **`dryRun: true` is the default.** The first call returns the planned per-file diff hunks (`before`/`after` per touched line, capped at 200 chars) and writes nothing; `dryRun: false` is required to apply.
+- Error conflicts always block the write: `invalid-name` (non-identifier or reserved word), `same-name`, `unresolved-target`, `no-locations`, `unsupported-provider`, `path-escape`, `missing-file`, `too-many-files` (`maxFiles`, default 50).
+- `name-collision` is a `warning` with `basis: 'heuristic'` and only blocks under `strict: true`, because the check does not verify scope overlap — blocking on it would produce false positives.
+- Writes go through `resolveSafePath` and edits are applied in descending offset order. After a real write, `diagnosticsAfter` reports remaining TypeScript errors in the touched files, backed by a new `touchFiles` provider method that invalidates script versions so the LanguageService sees the new content.
+- `smart_edit` is unchanged and remains the right tool for non-semantic textual replacements.
+
+### Added — `smart_output` (new tool): persistent output store
+
+- Persists command output (`shell`, `test`, `build`, `lint`, `diff`) to the new `outputs` table so a stack trace from twenty turns ago is recoverable **without rerunning the command**.
+- Actions: `save`, `search` (metadata + matching line snippets, never full bodies), `excerpt` (surrounding lines by `query` or `line`, overlapping windows merged), `summary` (counts, detected error lines, head/tail), `list`, `stats`, `prune`.
+- **Privacy:** content is scrubbed for likely API keys / JWTs / connection strings / emails / home paths before persistence.
+- **Size:** above `DEVCTX_OUTPUT_MAX_BYTES` (default 256KB) the middle is dropped and **head + tail are preserved**, with a marker counting omitted lines — the failing tail is what matters.
+- **Retention:** `DEVCTX_OUTPUT_RETENTION_DAYS` (default 14) and `DEVCTX_OUTPUT_MAX_PER_KIND` (default 50), enforced on `save` (60s throttle), on `prune`, and by `runStorageMaintenance`.
+- **Cleanup:** identical output for the same `kind`+`command` increments `repeat_count` via a unique index instead of duplicating rows.
+- **Degradation:** every operation returns `degraded: true` with a reason instead of throwing when SQLite is unavailable (Node <22), locked, or corrupt.
+- Automatic capture from `smart_shell` / `smart_test` is **opt-in** via `DEVCTX_OUTPUT_STORE=true`; explicit `save`/`search` always work. When enabled, `smart_shell` returns an `outputRef` and `smart_test` propagates it. The store keeps the raw (scrubbed) output while the tool response stays compressed.
+- `debug-flake` playbook now pulls the last persisted test failures.
+
+### Added — opt-in semantic expansion in `smart_context`
+
+- `include: ['semantic']` expands context through real definitions, references and implementations instead of text similarity, and every context item gains a `whyIncluded` explanation.
+- New evidence types (`semanticDefinition`, `semanticImplementation`, `semanticReference`) feed role inference and scoring.
+- **Off by default** until the precision@5 benchmark justifies otherwise.
+
+### Added — ADR/spec indexing and graph paths
+
+- ADRs and specs are indexed as `kind='adr'` / `kind='adr-section'`, filterable from `smart_search`.
+- `smart_context` supports `paths: { from, to }` to traverse the import graph between two files or symbols, with a nearest-neighbour fallback.
+
+### Changed
+
+- `SQLITE_SCHEMA_VERSION` 8 → 9; `outputs` added to `EXPECTED_TABLES` and to the storage garbage collector.
+- `smart_shell` result may include `outputRef` when output capture is enabled.
+
+### Fixed
+
+- `global_memory` noise-hint reads threw on `~/.devctx/global.db` files created before the `noise_hints` table existed. They now return an empty result flagged with `schemaIncomplete: true` instead of propagating `no such table`.
+- `npm run verify` failed with `smart_read: Invalid result` when run from the package directory (the documented way), because the fixture paths were hardcoded relative to the repo root and got double-prefixed. Paths are now derived from the script location relative to the detected `projectRoot`, so verification passes from either directory. The `smart_read_batch` check also no longer reports success when both batch entries came back as errors.
+
+### Tests
+
+- `tests/semantic-provider.test.js`: 19 tests covering the provider contract, symbol resolution, normalized diagnostics, impact sections, rename dry run, applied rename, blocking conflicts and fallback behaviour.
+- `tests/smart-output.test.js`: 17 tests covering line classification, summarize, excerpt window merging, head+tail truncation, kind inference, policy defaults, opt-in capture, validation, dedupe, scrubbing, stats, per-kind caps and retention.
+- Full suite: **956 pass, 0 fail, 1 skipped** (the skip is SQLite-dependent and expected on Node <22).
+
 ## [1.20.0] - 2026-06-11
 
 Minor release. Same 20 tools — no additions, no removals — but several gain new parameters and richer response fields focused on **hard token-budget control**, **search-mode discipline**, and **second-read cache reuse**. `SQLITE_SCHEMA_VERSION` bumps 7 → 8 (new `read_cache` table). `~/.devctx/global.db` schema bumps 1 → 2 (new `noise_hints` table). Both migrate automatically on first run. **Zero new runtime dependencies.**

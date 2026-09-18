@@ -165,6 +165,36 @@ describe('global-memory :: store CRUD', { skip: SKIP_SQLITE_TESTS }, () => {
     const after = await getNoiseHints({ projectPath: '/projects/demo' });
     assert.equal(after.hints.length, 0);
   });
+
+  it('treats a legacy database without noise_hints as empty during read-only lookup', async () => {
+    const legacyDb = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'devctx-gm-legacy-')), 'global.db');
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(legacyDb);
+    db.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        content TEXT NOT NULL,
+        tags TEXT,
+        project_hash TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        usage_count INTEGER NOT NULL DEFAULT 0,
+        last_used_at INTEGER
+      );
+    `);
+    db.close();
+
+    try {
+      const result = await getNoiseHints({ projectPath: '/projects/demo', filePath: legacyDb });
+      assert.deepStrictEqual(result.hints, []);
+      assert.equal(result.total, 0);
+      assert.equal(result.schemaIncomplete, true);
+    } finally {
+      fs.rmSync(path.dirname(legacyDb), { recursive: true, force: true });
+    }
+  });
 });
 
 describe('global-memory :: tool surface', { skip: SKIP_SQLITE_TESTS }, () => {

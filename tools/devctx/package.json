@@ -1,7 +1,7 @@
 {
   "name": "smart-context-mcp",
   "mcpName": "io.github.Arrayo/smart-context-mcp",
-  "version": "1.20.0",
+  "version": "1.21.0",
   "description": "MCP server that reduces agent token usage by 90% with intelligent context compression, task checkpoint persistence, and workflow-aware agent guidance.",
   "author": "Francisco Caballero Portero <fcp1978@hotmail.com>",
   "type": "module",

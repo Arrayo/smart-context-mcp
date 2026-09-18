@@ -4,6 +4,8 @@
  * Direct feature verification - calls functions directly instead of via MCP.
  */
 
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildIndex, buildIndexIncremental, persistIndex } from '../src/index.js';
 import { smartRead } from '../src/tools/smart-read.js';
 import { smartSearch } from '../src/tools/smart-search.js';
@@ -13,6 +15,13 @@ import { warmCache, getCacheStats } from '../src/cache-warming.js';
 import { getSymbolBlame, getFileAuthorshipStats, getRecentlyModifiedSymbols } from '../src/git-blame.js';
 import { discoverRelatedProjects, getCrossProjectStats } from '../src/cross-project.js';
 import { projectRoot } from '../src/utils/paths.js';
+
+const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const fromPackage = (relativePath) =>
+  path.relative(projectRoot, path.join(packageDir, relativePath)).split(path.sep).join('/');
+
+const SERVER_FILE = fromPackage('src/server.js');
+const INDEX_FILE = fromPackage('src/index.js');
 
 const results = {
   passed: [],
@@ -53,7 +62,7 @@ const runTests = async () => {
 
   try {
     const result = await smartRead({
-      filePath: 'tools/devctx/src/server.js',
+      filePath: SERVER_FILE,
       mode: 'outline'
     });
     
@@ -100,12 +109,12 @@ const runTests = async () => {
   try {
     const result = await smartReadBatch({
       files: [
-        { path: 'tools/devctx/src/server.js', mode: 'outline' },
-        { path: 'tools/devctx/src/index.js', mode: 'outline' }
+        { path: SERVER_FILE, mode: 'outline' },
+        { path: INDEX_FILE, mode: 'outline' }
       ]
     });
-    
-    if (result.results && result.results.length === 2) {
+
+    if (result.results?.length === 2 && result.results.every((item) => !item.error)) {
       success(`smart_read_batch: ${result.metrics.filesRead} archivos`);
     } else {
       throw new Error('Invalid result');

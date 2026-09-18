@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { projectRoot } from '../utils/runtime-config.js';
 
 export const STATE_DB_FILENAME = 'state.sqlite';
-export const SQLITE_SCHEMA_VERSION = 8;
+export const SQLITE_SCHEMA_VERSION = 9;
 export const ACTIVE_SESSION_SCOPE = 'project';
 export const STATE_DB_SOFT_MAX_BYTES = 32 * 1024 * 1024;
 const STATE_DB_BUSY_TIMEOUT_MS = 1000;
@@ -20,6 +20,7 @@ export const EXPECTED_TABLES = [
   'hook_turn_state',
   'meta',
   'metrics_events',
+  'outputs',
   'read_cache',
   'session_events',
   'sessions',
@@ -285,6 +286,37 @@ const MIGRATIONS = [
         ON read_cache(file_path, mode, updated_at DESC)`,
       `CREATE INDEX IF NOT EXISTS idx_read_cache_updated
         ON read_cache(updated_at DESC)`,
+    ],
+  },
+  {
+    version: 9,
+    statements: [
+      `CREATE TABLE IF NOT EXISTS outputs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        command TEXT NOT NULL DEFAULT '',
+        exit_code INTEGER,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        content TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        bytes INTEGER NOT NULL DEFAULT 0,
+        line_count INTEGER NOT NULL DEFAULT 0,
+        truncated INTEGER NOT NULL DEFAULT 0,
+        repeat_count INTEGER NOT NULL DEFAULT 1,
+        session_id TEXT,
+        task_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_outputs_kind_created
+        ON outputs(kind, created_at DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_outputs_status
+        ON outputs(status, created_at DESC)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_outputs_dedupe
+        ON outputs(kind, command, content_hash)`,
+      `CREATE INDEX IF NOT EXISTS idx_outputs_updated
+        ON outputs(updated_at DESC)`,
     ],
   },
 ];
@@ -1534,6 +1566,7 @@ export const runStorageMaintenance = async ({
     contextAccess: removeOlder('DELETE FROM context_access WHERE timestamp < ?'),
     explainCache: removeOlder('DELETE FROM explain_cache WHERE updated_at < ?'),
     readCache: removeOlder('DELETE FROM read_cache WHERE updated_at < ?'),
+    outputs: removeOlder('DELETE FROM outputs WHERE updated_at < ?'),
   };
 
   setMeta(db, STORAGE_GC_META_KEY, String(now));
@@ -2078,6 +2111,185 @@ export const setReadCache = async ({
 export const clearReadCachePersistent = async ({ filePath = getStateDbPath() } = {}) => withStateDb((db) => {
   return db.prepare('DELETE FROM read_cache').run().changes;
 }, { filePath });
+
+const OUTPUT_COLUMNS = `
+  id, kind, label, command, exit_code, status, content_hash,
+  bytes, line_count, truncated, repeat_count, session_id, task_id,
+  created_at, updated_at
+`;
+
+const normalizeOutputRow = (row, { includeContent = false } = {}) => {
+  if (!row) return null;
+  return {
+    id: row.id,
+    kind: row.kind,
+    label: row.label,
+    command: row.command,
+    exitCode: row.exit_code,
+    status: row.status,
+    contentHash: row.content_hash,
+    bytes: row.bytes,
+    lines: row.line_count,
+    truncated: row.truncated === 1,
+    repeatCount: row.repeat_count,
+    sessionId: row.session_id,
+    taskId: row.task_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    ...(includeContent ? { content: row.content } : {}),
+  };
+};
+
+export const insertOutput = async ({
+  filePath = getStateDbPath(),
+  kind,
+  label = '',
+  command = '',
+  exitCode = null,
+  status = 'unknown',
+  content,
+  contentHash,
+  bytes = 0,
+  lines = 0,
+  truncated = false,
+  sessionId = null,
+  taskId = null,
+} = {}) => withStateDb((db) => {
+  if (!kind || typeof content !== 'string') return null;
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO outputs(
+      kind, label, command, exit_code, status, content, content_hash,
+      bytes, line_count, truncated, repeat_count, session_id, task_id,
+      created_at, updated_at
+    )
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+    ON CONFLICT(kind, command, content_hash) DO UPDATE SET
+      repeat_count = repeat_count + 1,
+      exit_code = excluded.exit_code,
+      status = excluded.status,
+      session_id = excluded.session_id,
+      task_id = excluded.task_id,
+      updated_at = excluded.updated_at
+  `).run(
+    kind, label, command, exitCode, status, content, contentHash,
+    bytes, lines, truncated ? 1 : 0, sessionId, taskId, now, now,
+  );
+
+  const row = db.prepare(`
+    SELECT ${OUTPUT_COLUMNS} FROM outputs
+    WHERE kind = ? AND command = ? AND content_hash = ?
+  `).get(kind, command, contentHash);
+
+  return normalizeOutputRow(row);
+}, { filePath });
+
+export const getOutput = async ({ filePath = getStateDbPath(), id } = {}) => withStateDb((db) => {
+  if (!Number.isInteger(id)) return null;
+  const row = db.prepare(`
+    SELECT ${OUTPUT_COLUMNS}, content FROM outputs WHERE id = ?
+  `).get(id);
+  return normalizeOutputRow(row, { includeContent: true });
+}, { filePath, readOnly: true });
+
+export const listOutputs = async ({
+  filePath = getStateDbPath(),
+  kind = null,
+  status = null,
+  limit = 10,
+} = {}) => withStateDb((db) => {
+  const clauses = [];
+  const params = [];
+  if (kind) { clauses.push('kind = ?'); params.push(kind); }
+  if (status) { clauses.push('status = ?'); params.push(status); }
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  params.push(limit);
+
+  const rows = db.prepare(`
+    SELECT ${OUTPUT_COLUMNS} FROM outputs
+    ${where}
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(...params);
+
+  return rows.map((row) => normalizeOutputRow(row));
+}, { filePath, readOnly: true });
+
+export const searchOutputs = async ({
+  filePath = getStateDbPath(),
+  query = '',
+  kind = null,
+  status = null,
+  limit = 10,
+} = {}) => withStateDb((db) => {
+  const clauses = [];
+  const params = [];
+  if (kind) { clauses.push('kind = ?'); params.push(kind); }
+  if (status) { clauses.push('status = ?'); params.push(status); }
+  if (query) {
+    clauses.push('(content LIKE ? ESCAPE \'\\\' OR command LIKE ? ESCAPE \'\\\' OR label LIKE ? ESCAPE \'\\\')');
+    const like = `%${query.replace(/[\\%_]/g, (match) => `\\${match}`)}%`;
+    params.push(like, like, like);
+  }
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  params.push(limit);
+
+  const rows = db.prepare(`
+    SELECT ${OUTPUT_COLUMNS}, content FROM outputs
+    ${where}
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(...params);
+
+  return rows.map((row) => normalizeOutputRow(row, { includeContent: true }));
+}, { filePath, readOnly: true });
+
+export const pruneOutputs = async ({
+  filePath = getStateDbPath(),
+  retentionDays = 14,
+  maxPerKind = 50,
+} = {}) => withStateDb((db) => {
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  const expired = db.prepare('DELETE FROM outputs WHERE updated_at < ?').run(cutoff).changes;
+
+  const overflow = db.prepare(`
+    DELETE FROM outputs WHERE id IN (
+      SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY updated_at DESC) AS position
+        FROM outputs
+      ) WHERE position > ?
+    )
+  `).run(maxPerKind).changes;
+
+  return { expired, overflow, removed: expired + overflow };
+}, { filePath });
+
+export const getOutputStats = async ({ filePath = getStateDbPath() } = {}) => withStateDb((db) => {
+  const totals = db.prepare(`
+    SELECT COUNT(*) AS entries, COALESCE(SUM(bytes), 0) AS bytes,
+           COALESCE(SUM(repeat_count), 0) AS captures
+    FROM outputs
+  `).get();
+
+  const byKind = db.prepare(`
+    SELECT kind, COUNT(*) AS entries, COALESCE(SUM(bytes), 0) AS bytes,
+           COALESCE(SUM(repeat_count - 1), 0) AS repeats
+    FROM outputs GROUP BY kind ORDER BY entries DESC
+  `).all();
+
+  return {
+    entries: totals?.entries ?? 0,
+    bytes: totals?.bytes ?? 0,
+    captures: totals?.captures ?? 0,
+    byKind: byKind.map((row) => ({
+      kind: row.kind,
+      entries: row.entries,
+      bytes: row.bytes,
+      dedupedRepeats: row.repeats,
+    })),
+  };
+}, { filePath, readOnly: true });
 
 const LAST_TEST_FAILURE_META_KEY = 'last_test_failure';
 

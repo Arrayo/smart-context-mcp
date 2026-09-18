@@ -87,7 +87,7 @@ npm test
 
 **Location:** `tools/devctx/scripts/verify-features-direct.js`
 
-**Description:** End-to-end verification of all 20 tools
+**Description:** End-to-end verification of all 22 tools
 
 **Purpose:** Ensure all features work correctly
 
@@ -116,7 +116,7 @@ Resumen:
 ```
 
 **What it tests:**
-- All 20 tools functional
+- All 22 tools functional
 - Core features working
 - Advanced features working
 - Integration correctness

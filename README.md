@@ -29,9 +29,16 @@ An MCP (Model Context Protocol) server that provides specialized tools for readi
 
 See [Workflow Metrics](./docs/workflow-metrics.md) and [Adoption Metrics](./docs/adoption-metrics-design.md) for details.
 
-## Latest Release: `1.20.0`
+## Latest Release: `1.21.0`
 
-Minor release. Same 20 tools, but several gain new parameters and response fields. SQLite schema bumps 7 → 8 (new `read_cache` table; auto-migrates on first run). Global memory DB schema bumps 1 → 2 (new `noise_hints` table). **Zero new runtime dependencies.**
+Minor release built around a **semantic engine**. MCP grows from **20 → 22 tools** (`smart_code` + `smart_output`). SQLite schema bumps 8 → 9 (new `outputs` table; auto-migrates on first run). **Zero new runtime dependencies** — the TypeScript LanguageService comes from the `typescript` package you already have, and degrades to a fallback provider when it isn't there.
+
+- **`smart_code` (new tool).** Semantic code navigation for JS/TS via the TypeScript LanguageService, resolving by **symbol name** (plus optional `filePath`) instead of forcing you to know a line and column. Actions: `definition`, `references`, `implementations`, `diagnostics`, `impact`, `rename`. Returns compact locations (file + 1-based start/end), never full file bodies. `includeTests=false` drops test paths; `maxResults` caps the payload.
+- **Impact analysis.** `smart_code(action='impact')` splits **direct** hits (semantic: definitions, references, implementations) from **transitive** files (import graph, `maxHops` default 2) and related tests, plus coverage flags. `risk.level` is labelled `basis: 'heuristic'` and says so in its own `note` — it is a ranking aid, not semantic certainty.
+- **Scope-aware rename, dry run by default.** `smart_code(action='rename')` uses `findRenameLocations` and **`dryRun: true` is the default**: the first call returns the planned per-file diff hunks (`before`/`after` per line) and writes nothing. Error conflicts (invalid or reserved `newName`, same name, unresolved target, path escape, missing file, blast radius over `maxFiles`) always block the write. `name-collision` is a heuristic warning that only blocks with `strict: true`, because the check doesn't verify scope overlap. After a real write, `diagnosticsAfter` reports remaining TypeScript errors in the touched files. `smart_edit` remains the tool for non-semantic textual replacements.
+- **`smart_output` (new tool).** Persistent output/artifact store (`shell`, `test`, `build`, `lint`, `diff`) so a stack trace from twenty turns ago is recoverable **without rerunning the command**. Actions: `save`, `search`, `excerpt`, `summary`, `list`, `stats`, `prune`. Content is scrubbed for likely secrets before persistence and truncated head+tail above `DEVCTX_OUTPUT_MAX_BYTES` (256KB) so the failing tail always survives. Retention via `DEVCTX_OUTPUT_RETENTION_DAYS` (14) and `DEVCTX_OUTPUT_MAX_PER_KIND` (50). Identical output for the same `kind`+`command` is deduped into `repeat_count`. Automatic capture from `smart_shell`/`smart_test` is opt-in via `DEVCTX_OUTPUT_STORE=true` (then `smart_shell` returns an `outputRef`); explicit `save`/`search` always work. Degrades with `degraded: true` instead of throwing when SQLite is unavailable or locked.
+- **Opt-in semantic expansion in `smart_context`.** `include: ['semantic']` expands context through real definitions, references and implementations rather than text similarity, and every item gains a `whyIncluded` explanation. Off by default until the precision@5 benchmark justifies otherwise.
+- **Richer ADR/spec awareness and graph paths** carried over from the same roadmap: ADR sections are indexed as `kind='adr'` / `'adr-section'`, and `smart_context` can return graph **paths** between two files or symbols.
 
 - **Shared `tokenBudget` across tools.** `smart_read`, `smart_read_batch`, `smart_context`, `smart_turn` (`start` + `end`) and `smart_resume` now accept `tokenBudget: number | { id?, maxTokens, shared? }`. When `shared:true` (or `id` set), the budget is reused across calls inside the same task — so a multi-step agent flow can stay under a hard token ceiling without per-call bookkeeping. Responses include `taskBudget`, `remainingBudget`, and `budgetDetails` (`scope`, `actions`, degraded mode) when the budget actually changed the output.
 - **`smart_search` search modes.** New `mode: 'needle' | 'balanced' | 'semantic'` (default `balanced`). `needle` = literal exact only (no regex / no term expansion) — kills noise on debug queries. `balanced` = exact + regex + term expansion. `semantic` = exact-first plus the local semantic block only when exact signal is weak. The previous `semantic: true` flag remains as a legacy alias for `mode: 'semantic'`. Default `maxFiles` tightened 15 → 5. New `maxTokens` caps the whole response and compacts intelligently (matches first, then diagnostics, then semantic block). Per-file ranking is now inspectable via `matchedBy`, `boostSource`, `scoreBreakdown`, `whyRanked`. Response also returns `hasMore` / `totalFiles` / `nextSuggestedMaxFiles` and actionable `suggestions` when the query is too broad or empty.
@@ -40,9 +47,19 @@ Minor release. Same 20 tools, but several gain new parameters and response field
 - **`global_memory` noise hints.** Per-project, scrubbed noise telemetry persisted to `~/.devctx/global.db` (`noise_hints` table). New actions `noise_stats` and `noise_reset` (full or via `query`). Lets `smart_search` learn which queries the agent already discovered to be noisy in a given repo and adjust ranking, without ever leaking content.
 - **KPI baseline infrastructure.** New scripts `evals/kpi-baseline.js` + `evals/kpi-utils.js` aggregate `harness.js` and `realworld-eval.js` runs into a single JSON snapshot with **top-5 precision, recall, reread task/call rate, and per-task-size buckets (short / long)**. Persists `kpi-baseline-latest.json` for regression detection across releases. New test suite `tests/eval-kpis.test.js`.
 
-### Highlights from `1.19.0` (still current)
+### Highlights from `1.20.0` (still current)
 
-Five-step quality jump executed as sequential commits with full dogfooding. MCP grows from **18 → 20 tools**, +68 tests, **zero new dependencies**, suite green at 882/883 (1 skipped).
+Same tool count as `1.19.0`, but several tools gained hard token-budget control, search-mode discipline and second-read cache reuse.
+
+- **Shared `tokenBudget` across tools.** `smart_read`, `smart_read_batch`, `smart_context`, `smart_turn` and `smart_resume` accept `tokenBudget: number | { id?, maxTokens, shared? }`, reusable across calls inside one task so a multi-step flow stays under a hard ceiling.
+- **`smart_search` modes.** `mode: 'needle' | 'balanced' | 'semantic'` (default `balanced`), `maxTokens` capping the whole response, and inspectable ranking via `matchedBy` / `scoreBreakdown` / `whyRanked`.
+- **`smart_read` persistent cache.** SQLite `read_cache` keyed by `(filePath, mode, selector, content_hash)`; a second read of an unchanged file is virtually free. Mode `full` degrades to lighter modes under a budget and reports the real mode used.
+- **`smart_turn` simple-task skip** on short trivial prompts, and **`global_memory` noise hints** that let `smart_search` learn which queries proved noisy per repo.
+- **KPI baseline infrastructure** (`evals/kpi-baseline.js`) snapshotting precision@5, recall, reread rate and latency for regression detection.
+
+### Highlights from `1.19.0`
+
+Five-step quality jump executed as sequential commits with full dogfooding. MCP grew from **18 → 20 tools**, +68 tests, **zero new dependencies**.
 
 - **`smart_playbook` (new tool).** Declarative composite workflows that run multiple `smart_*` tools in a single MCP call. Five built-in playbooks ship with the package: `preflight-merge` (review + affected tests + checkpoint), `debug-flake` (last failure + curated debug context + affected), `refactor-safe` (curated context + affected + checkpoint), `doc-sync` (ADR search + docs context), `ramp-up` (status + doctor + ADR overview). Project-level overrides via `.devctx/playbooks/*.{yaml,json}` with `{{args.X}}` interpolation, `when` / `label` / `stopOnFail` / `dryRun`. Tool allowlist restricted to `smart_*`. Zero deps: built-in minimal YAML parser.
 - **Reactive FS watcher for the index.** `fs.watch` (native, recursive, debounced 600ms + batch flush every 2s) keeps the symbol index hot between calls. Filters `.git`, `node_modules`, `.devctx`, `dist`, `build`, lockfiles, `.min.*`, `.map`, `.snap`, and non-indexable extensions. Stats surface in `smart_status` (`enabled`, `flushes`, `eventsObserved`, `filesReindexed`, `filesRemoved`, `errors`, `lastFlushAt`, `pending`). Opt-out via `DEVCTX_WATCH_INDEX=false`. Wired to MCP shutdown for clean close + final flush.
@@ -50,7 +67,7 @@ Five-step quality jump executed as sequential commits with full dogfooding. MCP 
 - **Local semantic re-rank on `smart_search`.** Opt-in `semantic: true` (with `semanticLimit`) returns a `semantic: { embedder, symbols[], files[] }` block ranked by hashing/TF-IDF embeddings (256-dim, FNV-1a buckets, L2-normalized, cosine similarity, <5ms). Default behavior unchanged. Pluggable embedder interface (`id`, `dimensions`, `embed`, `similarity`) ready to swap in ONNX/transformers without touching callers.
 - **`global_memory` (new tool, opt-in).** Cross-project memory persisted to `~/.devctx/global.db` (override via `DEVCTX_GLOBAL_DB`, gated by `DEVCTX_GLOBAL_MEMORY=true`). Stores canonical decisions, recurring patterns, playbook drafts, and notes across repos. Content scrubbed for likely API keys / bearer tokens / JWT / PEM private keys / AWS / OpenAI / GitHub / Slack / Google API / DB URLs / emails / home paths before persistence. Project paths stored as FNV-1a hash, not raw path. Recall uses the local hashing/TF-IDF embedder for semantic ranking.
 
-See [CHANGELOG.md](./CHANGELOG.md) for the full v1.20.0 + v1.19.0 entries.
+See [CHANGELOG.md](./CHANGELOG.md) for the full v1.21.0 + v1.20.0 entries.
 
 See [CHANGELOG.md](./CHANGELOG.md) for full release history.
 
@@ -378,12 +395,14 @@ This MCP **does not intercept** your prompts magically. Here's what actually hap
 
 ### What You Get
 
-**Tools (20):** Efficient alternatives to built-in operations
+**Tools (22):** Efficient alternatives to built-in operations
 - `smart_read` / `smart_read_batch` - Compressed file reading (outline, signatures, symbol, explain)
 - `smart_search` - Intent-aware code search with ranking, ADR filtering, and opt-in semantic re-rank
 - `smart_context` - One-call context builder with graph + `paths: { from, to }` traversal
 - `smart_test` - Affected tests via graph + sandboxed runner + persisted `last_failure`
 - `smart_review` - Code review preflight: diff + callers + heuristic findings
+- `smart_code` - Semantic navigation by symbol name: definition, references, implementations, diagnostics, impact, dry-run rename
+- `smart_output` - Persistent output store (shell/test/build/lint/diff): search, excerpt, summary without rerunning
 - `smart_playbook` - Declarative composite workflows (5 built-in: preflight-merge, debug-flake, refactor-safe, doc-sync, ramp-up)
 - `smart_shell` - Safe diagnostic commands (TAP/git-log/diff compression)
 - `smart_turn` / `smart_resume` - Session persistence + `nextActions[]` machine-readable plan
@@ -400,7 +419,7 @@ This MCP **does not intercept** your prompts magically. Here's what actually hap
 
 **Storage (`.devctx/`):** Local context database
 - `index.json` - Symbol index (functions, classes, imports, ADRs, sections) — `INDEX_VERSION 7`
-- `state.sqlite` - Sessions, metrics, patterns, task handoffs, test failures, explain cache (Node 22+, `node:sqlite`)
+- `state.sqlite` - Sessions, metrics, patterns, task handoffs, test failures, explain/read caches, persisted outputs (Node 22+, `node:sqlite`, schema 9)
 - `metrics.jsonl` - Opt-in legacy file, only when `DEVCTX_METRICS_FILE=path.jsonl` is set
 - `~/.devctx/global.db` - Cross-project memory (opt-in via `DEVCTX_GLOBAL_MEMORY=true`)
 
@@ -1110,7 +1129,7 @@ Restart your AI client. Done.
 # Check installed version
 npm list -g smart-context-mcp
 
-# Should show: smart-context-mcp@1.20.0 (or later)
+# Should show: smart-context-mcp@1.21.0 (or later)
 
 # Update to latest version
 npm update -g smart-context-mcp
@@ -1691,7 +1710,7 @@ See [MCP Prompts Documentation](./docs/mcp-prompts.md) for complete guide.
 ### Quick verification
 
 ```bash
-npm run verify  # Feature verification (20 tools)
+npm run verify  # Feature verification (22 tools)
 npm test        # Unit tests (740+ tests)
 npm run eval    # Synthetic corpus
 npm run eval:self  # Real project
@@ -2143,7 +2162,7 @@ This repository contains the `smart-context-mcp` npm package in `tools/devctx/`:
 │   ├── tests/             ← 740+ unit tests
 │   ├── evals/             ← Benchmarks & scenarios
 │   ├── scripts/           ← CLI binaries
-│   └── package.json       ← Package metadata (v1.20.0)
+│   └── package.json       ← Package metadata (v1.21.0)
 ├── docs/                  ← Documentation (GitHub only)
 ├── .github/workflows/     ← CI/CD with release gating
 └── README.md              ← This file

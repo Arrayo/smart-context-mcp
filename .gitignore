@@ -15,6 +15,7 @@ PUBLISH.md
 # Runtime data
 .devctx/
 tools/devctx/.devctx/
+.agent/
 
 # Eval results (generated)
 tools/devctx/evals/results/

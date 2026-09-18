@@ -56,7 +56,7 @@ Restart your AI client. Done.
 # Check installed version
 npm list -g smart-context-mcp
 
-# Should show: smart-context-mcp@1.20.0 (or later)
+# Should show: smart-context-mcp@1.21.0 (or later)
 
 # Update to latest version
 npm update -g smart-context-mcp
@@ -278,7 +278,7 @@ Check actual usage:
 
 Provides **two key components**:
 
-### 1. Specialized Tools (20 tools)
+### 1. Specialized Tools (22 tools)
 
 | Tool | Purpose | Savings |
 |------|---------|---------|
@@ -289,6 +289,8 @@ Provides **two key components**:
 | `smart_shell` | Safe command execution (TAP / git-log / diff compression) | 94% |
 | `smart_test` | Affected tests via graph + sandboxed runner + persisted `last_failure` | - |
 | `smart_review` | One-call review preflight: diff + callers + tests + heuristic findings | - |
+| `smart_code` | Semantic navigation by symbol name: definition / references / implementations / diagnostics / impact / dry-run rename | - |
+| `smart_output` | Persistent output store (shell / test / build / lint / diff): search, excerpt, summary without rerunning | - |
 | `build_index` | Symbol index builder (incremental) | - |
 | `warm_cache` | File preloading (5x faster cold start) | - |
 | `git_blame` | Function-level code attribution | - |
@@ -655,7 +657,7 @@ npm run verify
 
 Data stored in `.devctx/`:
 - `index.json` - Symbol index (`INDEX_VERSION 7`: ADR + ADR sections, richer Python/Go)
-- `state.sqlite` - Sessions, metrics, patterns, task handoffs, test failures, explain cache (Node 22+)
+- `state.sqlite` - Sessions, metrics, patterns, task handoffs, test failures, explain/read caches, persisted outputs (Node 22+, schema 9)
 - `metrics.jsonl` - Opt-in legacy file, only when `DEVCTX_METRICS_FILE=path.jsonl` is set
 
 Cross-project (opt-in via `DEVCTX_GLOBAL_MEMORY=true`):

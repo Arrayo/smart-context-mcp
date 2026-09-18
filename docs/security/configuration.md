@@ -176,7 +176,7 @@ export DEVCTX_METRICS_READONLY=true
 
 **Use case:** Normal development in trusted projects
 
-**Available tools:** All 20 tools
+**Available tools:** All 22 tools
 
 **Security:**
 - Allowlist-only commands
@@ -194,7 +194,7 @@ export DEVCTX_METRICS_READONLY=false
 
 **Use case:** Active development, performance testing
 
-**Available tools:** All 20 tools with full features
+**Available tools:** All 22 tools with full features
 
 **Security:**
 - Same protections as Standard

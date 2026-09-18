@@ -11,6 +11,8 @@ import { smartShell } from './tools/smart-shell.js';
 import { smartTest } from './tools/smart-test.js';
 import { smartReview } from './tools/smart-review.js';
 import { smartPlaybook } from './tools/smart-playbook.js';
+import { smartCode } from './tools/smart-code.js';
+import { smartOutput } from './tools/smart-output.js';
 import { globalMemory } from './tools/global-memory.js';
 import { startIndexWatcher, isWatchEnabled, setActiveWatcher } from './index-watcher.js';
 import { smartSummary } from './tools/smart-summary.js';
@@ -197,7 +199,7 @@ export const createDevctxServer = () => {
 
   server.tool(
     'smart_context',
-    'PREFERRED for multi-file tasks. Gets curated context in one call — replaces the manual search → read → read cycle. Combines search + graph expansion + selective reading. Primary files always include content (signatures) in balanced mode — reduces follow-up smart_read calls. Options: intent, maxTokens (budget, default 12000), diff (true for HEAD or branch name), detail (minimal/balanced/deep), include (content/graph/hints/symbolDetail), prefetch (true for predictive loading). Paths mode: pass `paths: { from, to }` to traverse the import graph between two files or symbols (BFS, max 5 hops by default). Returns the chain of files with signatures per hop, or nearest neighbors when no path exists. Use this instead of multiple smart_read+smart_search cycles to answer "how does X reach Y?". Call smart_context FIRST before individual smart_read/smart_search calls.',
+    'PREFERRED for multi-file tasks. Gets curated context in one call — replaces the manual search → read → read cycle. Combines search + graph expansion + selective reading. Primary files always include content (signatures) in balanced mode — reduces follow-up smart_read calls. Options: intent, maxTokens (budget, default 12000), diff (true for HEAD or branch name), detail (minimal/balanced/deep), include (content/graph/hints/symbolDetail/semantic), prefetch (true for predictive loading). Opt-in semantic expansion: pass include including "semantic" to resolve callers/implementations/tests via TypeScript LanguageService; each context item then includes whyIncluded. Default include omits semantic (import graph remains the fallback). Paths mode: pass `paths: { from, to }` to traverse the import graph between two files or symbols (BFS, max 5 hops by default). Returns the chain of files with signatures per hop, or nearest neighbors when no path exists. Use this instead of multiple smart_read+smart_search cycles to answer "how does X reach Y?". Call smart_context FIRST before individual smart_read/smart_search calls.',
     {
       task: z.string().optional(),
       intent: z.enum(['implementation', 'debug', 'tests', 'config', 'docs', 'explore']).optional(),
@@ -213,7 +215,7 @@ export const createDevctxServer = () => {
       entryFile: z.string().optional(),
       diff: z.union([z.boolean(), z.string()]).optional(),
       detail: z.enum(['minimal', 'balanced', 'deep']).optional(),
-      include: z.array(z.enum(['content', 'graph', 'hints', 'symbolDetail'])).optional(),
+      include: z.array(z.enum(['content', 'graph', 'hints', 'symbolDetail', 'semantic'])).optional(),
       prefetch: z.boolean().optional(),
       paths: z.object({
         from: z.string(),
@@ -264,6 +266,49 @@ export const createDevctxServer = () => {
     },
     async ({ ref, maxFiles, maxCallers, maxTests, includeBlame }) =>
       asTextResult(await smartReview({ ref, maxFiles, maxCallers, maxTests, includeBlame })),
+  );
+
+  server.tool(
+    'smart_code',
+    'Semantic code navigation and refactoring for JS/TS via TypeScript LanguageService. Actions: definition, references, implementations, diagnostics, impact, rename. Prefer symbol name (+ optional filePath) over line/character when possible. Returns compact locations (file, start/end 1-based) — never full file bodies. impact combines semantic direct hits with import-graph transitive expansion and related tests; risk.level is explicitly heuristic (basis:"heuristic"), not semantic certainty. rename is scope-aware (findRenameLocations) and dryRun:true BY DEFAULT: it returns the planned per-file diff hunks plus conflicts and writes nothing until you re-run with dryRun:false. Rename conflicts with severity "error" (invalid/reserved newName, same name, unresolved target, path escape, missing file, too many files) always block the write; name-collision conflicts are heuristic warnings that only block when strict=true. After a real write, diagnosticsAfter reports remaining TypeScript errors in the touched files. Falls back gracefully when the TypeScript provider cannot initialize. includeTests=false drops test/spec paths. maxResults caps returned locations (default 20). maxHops caps transitive graph expansion for impact (default 2). maxFiles caps rename blast radius (default 50). Use instead of Grep+full reads when you need callers, implementations, impact maps, the declaration of a known symbol, or a safe cross-file rename; smart_edit remains the choice for non-semantic textual replacements.',
+    {
+      action: z.enum(['definition', 'references', 'implementations', 'diagnostics', 'impact', 'rename']),
+      filePath: z.string().optional(),
+      symbol: z.string().optional(),
+      line: z.number().int().min(0).optional(),
+      character: z.number().int().min(0).optional(),
+      includeTests: z.boolean().optional(),
+      maxResults: z.number().int().min(1).max(100).optional(),
+      maxHops: z.number().int().min(1).max(5).optional(),
+      newName: z.string().optional(),
+      dryRun: z.boolean().optional(),
+      strict: z.boolean().optional(),
+      maxFiles: z.number().int().min(1).max(200).optional(),
+    },
+    async ({ action, filePath, symbol, line, character, includeTests, maxResults, maxHops, newName, dryRun, strict, maxFiles }) =>
+      asTextResult(await smartCode({ action, filePath, symbol, line, character, includeTests, maxResults, maxHops, newName, dryRun, strict, maxFiles })),
+  );
+
+  server.tool(
+    'smart_output',
+    'Persistent output/artifact store so command output survives the context window and never needs a rerun to be re-read. Kinds: shell, test, build, lint, diff. Actions: save (kind+content, plus optional command/label/exitCode), search (query/kind/status → metadata + matching line snippets, never full bodies), excerpt (id + query|line → surrounding lines with 1-based numbers), summary (id → counts, detected error lines, head/tail), list (recent entries), stats (entries/bytes per kind + deduped repeats), prune (force retention now). Content is scrubbed for likely secrets/JWTs/API keys/emails/home paths before persistence and truncated head+tail above DEVCTX_OUTPUT_MAX_BYTES (default 256KB) so the failing tail is always kept. Retention: DEVCTX_OUTPUT_RETENTION_DAYS (default 14) and DEVCTX_OUTPUT_MAX_PER_KIND (default 50), enforced on save (throttled) and by regular storage maintenance. Identical output for the same kind+command is deduped into repeat_count instead of duplicated. Automatic capture from smart_shell/smart_test is opt-in via DEVCTX_OUTPUT_STORE=true; explicit save/search always work. Degrades gracefully (degraded:true) when SQLite is unavailable (Node <22) or the database is locked — it never throws. Prefer this over rerunning a long build or test just to re-read a stack trace.',
+    {
+      action: z.enum(['save', 'search', 'excerpt', 'summary', 'list', 'stats', 'prune']),
+      id: z.number().int().optional(),
+      kind: z.enum(['shell', 'test', 'build', 'lint', 'diff']).optional(),
+      status: z.enum(['pass', 'fail', 'unknown']).optional(),
+      query: z.string().optional(),
+      content: z.string().optional(),
+      command: z.string().optional(),
+      label: z.string().optional(),
+      exitCode: z.number().int().optional(),
+      line: z.number().int().min(1).optional(),
+      before: z.number().int().min(0).max(50).optional(),
+      after: z.number().int().min(0).max(100).optional(),
+      limit: z.number().int().min(1).max(50).optional(),
+    },
+    async ({ action, id, kind, status, query, content, command, label, exitCode, line, before, after, limit }) =>
+      asTextResult(await smartOutput({ action, id, kind, status, query, content, command, label, exitCode, line, before, after, limit })),
   );
 
   server.tool(

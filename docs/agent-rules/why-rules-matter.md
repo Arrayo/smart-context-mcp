@@ -20,7 +20,7 @@ MCP: "¯\_(ツ)_/¯"
 We provide **tools + guidance**:
 
 ```
-MCP: "Here are 20 tools"
+MCP: "Here are 22 tools"
 Agent: "When should I use them?"
 MCP: "Here's a workflow for debugging..."
 Agent: "Perfect, I'll follow that"
@@ -255,7 +255,7 @@ Core rules (compact) + Profile docs (detailed):
 
 Teach **workflows**, not **tool catalogs**:
 - "Search → Read → Edit" (clear)
-- Not "Here are 20 tools" (overwhelming)
+- Not "Here are 22 tools" (overwhelming)
 
 **Why:** Agents think in workflows, not tool lists.
 
