@@ -2,8 +2,20 @@
 
 MCP server that reduces AI agent token usage by up to 90% through intelligent context compression (measured on this project).
 
-[![npm version](https://img.shields.io/npm/v/smart-context-mcp.svg)](https://www.npmjs.com/package/smart-context-mcp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+  <a href="https://www.npmjs.com/package/smart-context-mcp">
+    <img src="https://img.shields.io/npm/v/smart-context-mcp.svg" alt="npm version">
+  </a>
+  <a href="https://opensource.org/licenses/MIT">
+    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT License">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://mcprush.com/to/arrayo-smart-context-mcp?ref=badge">
+    <img src="https://mcprush.com/badge/arrayo-smart-context-mcp/card.svg" alt="Smart Context MCP on MCPRush">
+  </a>
+</p>
 
 ## What it is
 
